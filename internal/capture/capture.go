@@ -5,6 +5,14 @@
 // fields (Timestamp, CaptureLen, WireLen, RawData) set. It does not parse
 // any headers; that is Module 2's job.
 //
+// Backpressure depends on the source. When the output channel is full:
+//   - Live interface: the frame is dropped and counted in
+//     Stats.QueueDropped. Capture never blocks on a slow consumer, because
+//     the kernel would drop frames anyway while we waited.
+//   - Pcap file: capture waits for the consumer, so every frame in the file
+//     is delivered in order and Stats.QueueDropped is always 0. Cancelling
+//     the context or calling Close still stops a waiting capture promptly.
+//
 // Live capture uses libpcap through cgo, so building this package requires
 // the libpcap development headers (libpcap-dev on Debian/Ubuntu).
 package capture
@@ -62,9 +70,11 @@ type Config struct {
 	// Snaplen is the maximum bytes captured per frame (live only; a file
 	// keeps the snaplen it was recorded with). 0 means DefaultSnaplen.
 	Snaplen int
-	// QueueSize is the capacity of the output channel. When it is full,
-	// frames are dropped and counted in Stats.QueueDropped. 0 means
-	// DefaultQueueSize.
+	// QueueSize is the capacity of the output channel. 0 means
+	// DefaultQueueSize. When it is full, live capture drops frames and
+	// counts them in Stats.QueueDropped, so a slow consumer never stalls the
+	// capture. File input waits for the consumer instead, so a replayed pcap
+	// always delivers every frame.
 	QueueSize int
 	// Promisc enables promiscuous mode for live capture. Go cannot tell an
 	// unset bool from false, so use DefaultConfig to get the default of
@@ -91,7 +101,7 @@ type Stats struct {
 	// could read them, from pcap's ps_drop counter. Always 0 for files.
 	KernelDropped uint64
 	// QueueDropped is the number of frames dropped because the output
-	// channel was full.
+	// channel was full. Always 0 for files, which wait instead of dropping.
 	QueueDropped uint64
 	// QueueDepth is the number of frames currently waiting in the output
 	// channel.
@@ -103,6 +113,11 @@ type Capturer struct {
 	handle *pcap.Handle
 	live   bool
 	out    chan *packet.ParsedPacket
+
+	// dropWhenFull selects the full-queue policy: drop (live) or wait
+	// (file). It is separate from live so tests can exercise the drop path
+	// with file input.
+	dropWhenFull bool
 
 	captured      atomic.Uint64
 	kernelDropped atomic.Uint64
@@ -148,10 +163,12 @@ func New(cfg Config) (*Capturer, error) {
 		}
 	}
 
+	live := cfg.Interface != ""
 	return &Capturer{
-		handle: h,
-		live:   cfg.Interface != "",
-		out:    make(chan *packet.ParsedPacket, cfg.QueueSize),
+		handle:       h,
+		live:         live,
+		out:          make(chan *packet.ParsedPacket, cfg.QueueSize),
+		dropWhenFull: live,
 	}, nil
 }
 
@@ -337,14 +354,34 @@ func (c *Capturer) run(ctx context.Context) {
 		p := packet.NewParsedPacket(ci.Timestamp, uint32(ci.CaptureLength), uint32(ci.Length))
 		p.RawData = data
 
+		if !c.send(ctx, p) {
+			return
+		}
+	}
+	if c.live {
+		c.refreshKernelStats()
+	}
+}
+
+// send delivers p according to the backpressure policy and reports whether
+// capture should continue. With dropWhenFull it never blocks. Otherwise it
+// waits for room in the channel until ctx is done. ctx is the context Start
+// derived, and Close cancels it, so both a caller's cancel and Close unblock
+// a waiting send.
+func (c *Capturer) send(ctx context.Context, p *packet.ParsedPacket) bool {
+	if c.dropWhenFull {
 		select {
 		case c.out <- p:
 		default:
 			c.queueDropped.Add(1)
 		}
+		return true
 	}
-	if c.live {
-		c.refreshKernelStats()
+	select {
+	case c.out <- p:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

@@ -1,6 +1,6 @@
 module github.com/bUrn-1337/intrusion-detection-system
 
-go 1.27
+go 1.27.0
 
 require github.com/gopacket/gopacket v1.7.2
 
