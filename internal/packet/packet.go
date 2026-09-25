@@ -41,6 +41,13 @@ const (
 	L4Other = "OTHER"
 )
 
+// Values for ParsedPacket.L4ChecksumStatus.
+const (
+	L4ChecksumUnchecked uint8 = iota
+	L4ChecksumValid
+	L4ChecksumInvalid
+)
+
 // Values for ParsedPacket.AppProtocol. The empty string means Module 4 has
 // not set it.
 const (
@@ -198,6 +205,27 @@ type ParsedPacket struct {
 	// ICMPCode is the ICMP (or ICMPv6) code. It is only meaningful when
 	// L4Proto is L4ICMP.
 	ICMPCode uint8
+	// L4ChecksumStatus is the result of verifying the TCP, UDP, ICMPv4 or
+	// ICMPv6 checksum: L4ChecksumUnchecked, L4ChecksumValid or
+	// L4ChecksumInvalid. TCP, UDP and ICMPv6 include the IP pseudo-header;
+	// ICMPv4 covers the ICMP message only.
+	//
+	// It stays Unchecked when the checksum cannot be verified from this
+	// frame alone: the segment was not fully captured (snaplen); the packet
+	// is a GRO/TSO merge (IPTotalLen > 1500, which includes the BIG TCP and
+	// jumbogram cases), whose checksum was never recomputed for the merged
+	// packet; the packet is a fragment (IPFragmented), since the checksum
+	// covers the reassembled datagram; the header is malformed; or the
+	// protocol has no checksum to check. A UDP checksum of 0 over IPv4
+	// means "no checksum" and is also Unchecked.
+	//
+	// Otherwise it is Valid or Invalid. Invalid is not a parse error, and
+	// is not an attack by itself: with checksum offloading, packets
+	// captured on the sending host usually carry an unfilled checksum that
+	// the NIC fills in after capture. The one exception is a zero UDP
+	// checksum over IPv6, which is forbidden, so it is Invalid and also
+	// recorded in ParseErrors.
+	L4ChecksumStatus uint8
 
 	// ---- Module 4: HTTP / DNS / FTP / TLS ----
 
@@ -251,13 +279,18 @@ func NewParsedPacket(ts time.Time, captureLen, wireLen uint32) *ParsedPacket {
 
 // Payload returns the application payload: RawData[PayloadOffset:end],
 // where end is IPEnd() for IP packets and len(RawData) otherwise, so
-// Ethernet padding is never returned as payload. It returns nil if
-// PayloadOffset is negative or past end, and never panics. If
+// Ethernet padding is never returned as payload. For UDP, end is also
+// capped at the end of the datagram given by UDPLen, so bytes that follow
+// the datagram inside the IP packet are not returned either. It returns nil
+// if PayloadOffset is negative or past end, and never panics. If
 // PayloadOffset equals end, the result is empty.
 func (p *ParsedPacket) Payload() []byte {
 	end := len(p.RawData)
 	if e := p.IPEnd(); e >= 0 {
 		end = e
+	}
+	if p.L4Proto == L4UDP && p.L4Offset >= 0 && p.UDPLen >= 8 {
+		end = min(end, p.L4Offset+int(p.UDPLen))
 	}
 	if p.PayloadOffset < 0 || p.PayloadOffset > end {
 		return nil

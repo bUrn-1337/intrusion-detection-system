@@ -8,6 +8,7 @@ import (
 
 	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/lower"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/upper"
 )
 
 func TestDescribe(t *testing.T) {
@@ -22,14 +23,32 @@ func TestDescribe(t *testing.T) {
 			name: "ipv4 tcp",
 			hexData: ethIPv4 + "45000028123400004006" + "549a" + "0a0000010a000002" +
 				"04d2005000000000000000005002000000000000",
-			want: "len=54  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=6 ttl=64",
+			want: "len=54  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=6 ttl=64  TCP 1234 -> 80 [SYN] seq=0 ack=0 win=0 len=0 [bad-l4csum]",
 		},
 		{
 			name: "ipv4 fragment with bad checksum, truncated capture",
 			hexData: ethIPv4 + "45000028123420004006" + "0000" + "0a0000010a000002" +
 				"04d2005000000000000000005002000000000000",
 			wireLen: 100,
-			want:    "len=100 cap=54  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=6 ttl=64 frag bad-csum",
+			want:    "len=100 cap=54  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=6 ttl=64 frag bad-csum  TCP 1234 -> 80 [SYN] seq=0 ack=0 win=0 len=0",
+		},
+		{
+			name: "ipv4 tcp syn-ack with payload, valid checksum",
+			hexData: ethIPv4 + "4500002b123400004006" + "5497" + "0a0000010a000002" +
+				"01bb9c40" + "000003e8" + "000007d0" + "5012faf0" + "32c6" + "0000" + "616263",
+			want: "len=57  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=6 ttl=64  TCP 443 -> 40000 [SYN,ACK] seq=1000 ack=2000 win=64240 len=3",
+		},
+		{
+			name: "ipv4 udp, no checksum",
+			hexData: ethIPv4 + "45000021123400004011" + "5496" + "0a0000010a000002" +
+				"9c400035000d0000" + "7175657279",
+			want: "len=47  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=17 ttl=64  UDP 40000 -> 53 len=13",
+		},
+		{
+			name: "ipv4 icmp port unreachable",
+			hexData: ethIPv4 + "4500002000000000400" + "1" + "0000" + "0a0000010a000002" +
+				"0303fcfc" + "00000000" + "00000000",
+			want: "len=46  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=1 ttl=64 bad-csum  ICMP Destination Unreachable (port unreachable)",
 		},
 		{
 			name:    "ipv6",
@@ -81,6 +100,7 @@ func TestDescribe(t *testing.T) {
 			p := packet.NewParsedPacket(time.Date(2026, 9, 25, 10, 0, 0, 0, time.UTC), uint32(len(data)), wire)
 			p.RawData = data
 			lower.Parse(p)
+			upper.Parse(p)
 
 			got := describe(p)
 			const ts = "2026-09-25T10:00:00Z  "

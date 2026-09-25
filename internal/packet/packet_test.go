@@ -129,6 +129,35 @@ func TestPayloadExcludesPadding(t *testing.T) {
 	}
 }
 
+func TestPayloadStopsAtUDPLength(t *testing.T) {
+	// 14 Ethernet + 20 IPv4 + 8 UDP + "hi", then 3 bytes inside the IP
+	// packet after the datagram, then padding.
+	raw := make([]byte, 60)
+	copy(raw[42:], "hi!!!")
+	p := NewParsedPacket(testTS, 60, 60)
+	p.RawData = raw
+	p.IPVersion = 4
+	p.L3Offset = 14
+	p.IPTotalLen = 33
+	p.L4Offset = 34
+	p.PayloadOffset = 42
+	p.UDPLen = 10
+
+	p.L4Proto = L4UDP
+	if got := p.Payload(); string(got) != "hi" {
+		t.Errorf("UDP Payload() = %q, want %q", got, "hi")
+	}
+	p.UDPLen = 0 // jumbogram: no length, IPEnd() bounds it
+	if got := p.Payload(); string(got) != "hi!!!" {
+		t.Errorf("UDP Payload() with UDPLen 0 = %q, want %q", got, "hi!!!")
+	}
+	p.UDPLen = 10
+	p.L4Proto = L4TCP // UDPLen is ignored for other protocols
+	if got := p.Payload(); string(got) != "hi!!!" {
+		t.Errorf("TCP Payload() = %q, want %q", got, "hi!!!")
+	}
+}
+
 func TestIPEnd(t *testing.T) {
 	raw := make([]byte, 60)
 
