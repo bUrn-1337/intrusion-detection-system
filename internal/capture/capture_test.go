@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -108,7 +109,16 @@ func newFileCapturer(t *testing.T, path string, cfg Config) *Capturer {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { c.Close() })
+	t.Cleanup(func() {
+		// Bound Close so a capture bug fails the test instead of hanging it.
+		done := make(chan struct{})
+		go func() { c.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("Close hung in cleanup: capture goroutine never exited")
+		}
+	})
 	return c
 }
 
@@ -223,9 +233,19 @@ func TestCaptureAndWireLen(t *testing.T) {
 	}
 }
 
-func TestQueueDropWhenConsumerStalls(t *testing.T) {
+func TestFileDoesNotDropByDefault(t *testing.T) {
+	c := newFileCapturer(t, writePcap(t, layers.LinkTypeEthernet, udpFrames(1)), Config{})
+	if c.dropWhenFull {
+		t.Error("file capturer has dropWhenFull = true, want false (files wait for the consumer)")
+	}
+}
+
+// TestLiveQueueDropsWhenConsumerStalls exercises the live-capture drop
+// policy. Live capture needs root, so it forces that policy on file input.
+func TestLiveQueueDropsWhenConsumerStalls(t *testing.T) {
 	const total, queue = 50, 2
 	c := newFileCapturer(t, writePcap(t, layers.LinkTypeEthernet, udpFrames(total)), Config{QueueSize: queue})
+	c.dropWhenFull = true
 
 	ch := c.Start(context.Background())
 
@@ -254,6 +274,135 @@ func TestQueueDropWhenConsumerStalls(t *testing.T) {
 	if len(got) > 0 && !got[0].Timestamp.Equal(baseTS) {
 		t.Errorf("first queued packet Timestamp = %v, want %v", got[0].Timestamp, baseTS)
 	}
+}
+
+func TestFileDeliversEveryFrameToSlowConsumer(t *testing.T) {
+	const total = 5000
+	frames := udpFrames(total)
+	c := newFileCapturer(t, writePcap(t, layers.LinkTypeEthernet, frames), Config{QueueSize: 1})
+
+	ch := c.Start(context.Background())
+
+	var got []*packet.ParsedPacket
+	timeout := time.After(30 * time.Second)
+	for done := false; !done; {
+		select {
+		case p, ok := <-ch:
+			if !ok {
+				done = true
+				break
+			}
+			got = append(got, p)
+			time.Sleep(10 * time.Microsecond)
+		case <-timeout:
+			t.Fatalf("channel not closed after 30s (received %d of %d)", len(got), total)
+		}
+	}
+
+	if len(got) != total {
+		t.Fatalf("received %d packets, want all %d", len(got), total)
+	}
+	for i, p := range got {
+		if !p.Timestamp.Equal(frames[i].ts) {
+			t.Fatalf("packet %d Timestamp = %v, want %v (out of order or missing)", i, p.Timestamp, frames[i].ts)
+		}
+	}
+	if s := c.Stats(); s.Captured != total || s.QueueDropped != 0 {
+		t.Errorf("Stats = %+v, want Captured=%d and QueueDropped=0", s, total)
+	}
+}
+
+// startStalled starts a file capturer with QueueSize 1 whose consumer never
+// reads, and returns once the capture goroutine is blocked on a full queue.
+// It also returns the goroutine count from before Start.
+func startStalled(t *testing.T, ctx context.Context) (*Capturer, <-chan *packet.ParsedPacket, int) {
+	t.Helper()
+	c := newFileCapturer(t, writePcap(t, layers.LinkTypeEthernet, udpFrames(100)), Config{QueueSize: 1})
+	baseline := runtime.NumGoroutine()
+	ch := c.Start(ctx)
+
+	// One frame fills the queue; the second is read and then held in the
+	// blocked send.
+	deadline := time.Now().Add(5 * time.Second)
+	for c.Stats().Captured < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("capturer never filled the queue: Stats = %+v", c.Stats())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if s := c.Stats(); s.QueueDropped != 0 {
+		t.Fatalf("file capture dropped frames: Stats = %+v", s)
+	}
+	return c, ch, baseline
+}
+
+// assertStopped checks, without the consumer reading anything first, that
+// the capture goroutine exits within 1s and the goroutine count returns to
+// baseline. Only then does it read ch, which must already be closed. (Reading
+// first would free a queue slot and let a send that ignores cancellation
+// complete, hiding the bug.)
+func assertStopped(t *testing.T, c *Capturer, ch <-chan *packet.ParsedPacket, baseline int) {
+	t.Helper()
+	select {
+	case <-c.done:
+	case <-time.After(time.Second):
+		t.Fatal("capture goroutine still blocked 1s after stop: the send ignores cancellation")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for runtime.NumGoroutine() > baseline {
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutine leak: %d goroutines, want <= %d", runtime.NumGoroutine(), baseline)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// The goroutine has exited, so ch is closed; at most the one queued
+	// frame can come out before that is observed.
+	for i := 0; ; i++ {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				if err := c.Err(); err != nil {
+					t.Errorf("Err() = %v after stop, want nil", err)
+				}
+				return
+			}
+			if i >= 1 {
+				t.Fatalf("received %d frames after stop, want at most the 1 queued", i+1)
+			}
+		default:
+			t.Fatal("capture goroutine exited but the channel is not closed")
+		}
+	}
+}
+
+func TestCancelUnblocksStalledFileCapture(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c, ch, baseline := startStalled(t, ctx)
+
+	cancel()
+	assertStopped(t, c, ch, baseline)
+}
+
+func TestCloseUnblocksStalledFileCapture(t *testing.T) {
+	c, ch, baseline := startStalled(t, context.Background())
+
+	// Close waits for the capture goroutine, so run it separately: if the
+	// blocked send ignored Close, this would deadlock rather than fail.
+	closed := make(chan error, 1)
+	go func() { closed <- c.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return within 1s")
+	}
+
+	assertStopped(t, c, ch, baseline)
 }
 
 func TestChannelClosesAtEOF(t *testing.T) {
