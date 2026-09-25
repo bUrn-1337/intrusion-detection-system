@@ -127,7 +127,9 @@ type ParsedPacket struct {
 	IPProto uint8
 	// IPTotalLen is the IPv4 Total Length field, or the IPv6 Payload Length
 	// plus 40 for the fixed header. It is taken from the header, not from
-	// RawData, so it can be larger than what was captured.
+	// RawData, so it can be larger than what was captured. It can also be
+	// smaller than RawData minus L3Offset when the frame has Ethernet
+	// padding; use IPEnd() to find where the IP packet really ends.
 	IPTotalLen uint32
 	// IPChecksumValid reports whether the IPv4 header checksum verified.
 	// IPv6 has no header checksum, so Module 2 sets it to true for IPv6.
@@ -147,8 +149,10 @@ type ParsedPacket struct {
 	// complete L4 header in non-first fragments.
 	IPFragmented bool
 
-	// ARPOp is ARPRequest or ARPReply, or 0 if the packet is not ARP. The
-	// ARP* address fields are only meaningful when it is non-zero.
+	// ARPOp is the ARP opcode, normally ARPRequest or ARPReply, or 0 if the
+	// packet is not ARP. Any other opcode is stored as-is and Module 2 also
+	// records a parse error. The ARP* address fields are only meaningful
+	// when it is non-zero.
 	ARPOp uint16
 	// ARPSenderMAC is the ARP sender hardware address.
 	ARPSenderMAC net.HardwareAddr
@@ -245,14 +249,44 @@ func NewParsedPacket(ts time.Time, captureLen, wireLen uint32) *ParsedPacket {
 	}
 }
 
-// Payload returns RawData[PayloadOffset:]. It returns nil if PayloadOffset
-// is negative or past the end of RawData, and never panics. If
-// PayloadOffset equals len(RawData), the result is empty.
+// Payload returns the application payload: RawData[PayloadOffset:end],
+// where end is IPEnd() for IP packets and len(RawData) otherwise, so
+// Ethernet padding is never returned as payload. It returns nil if
+// PayloadOffset is negative or past end, and never panics. If
+// PayloadOffset equals end, the result is empty.
 func (p *ParsedPacket) Payload() []byte {
-	if p.PayloadOffset < 0 || p.PayloadOffset > len(p.RawData) {
+	end := len(p.RawData)
+	if e := p.IPEnd(); e >= 0 {
+		end = e
+	}
+	if p.PayloadOffset < 0 || p.PayloadOffset > end {
 		return nil
 	}
-	return p.RawData[p.PayloadOffset:]
+	return p.RawData[p.PayloadOffset:end]
+}
+
+// IPEnd returns the offset in RawData just past the last byte of the IP
+// packet: L3Offset + IPTotalLen, capped at len(RawData).
+//
+// Use it instead of len(RawData) as the end of the transport header and
+// payload. Ethernet pads frames shorter than 60 bytes (and some links add
+// trailers), so the bytes from IPEnd() to len(RawData) are link-layer
+// filler, never IP data. For example, a 40-byte TCP SYN in a 60-byte frame
+// has IPEnd() == 54, and bytes 54-59 are padding.
+//
+// It returns -1 if no IP header was parsed (IPVersion == 0 or L3Offset
+// out of range). Otherwise the result is in [L3Offset, len(RawData)]. It
+// can be less than L4Offset in a malformed packet whose length field is
+// smaller than its headers, so callers must still check before slicing.
+func (p *ParsedPacket) IPEnd() int {
+	if p.IPVersion == 0 || p.L3Offset < 0 || p.L3Offset > len(p.RawData) {
+		return -1
+	}
+	end := int64(p.L3Offset) + int64(p.IPTotalLen)
+	if end > int64(len(p.RawData)) {
+		return len(p.RawData)
+	}
+	return int(end)
 }
 
 // AddError records a parse error on the packet. Every parser module should
