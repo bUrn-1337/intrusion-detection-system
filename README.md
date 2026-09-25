@@ -33,6 +33,26 @@ communicate through a single shared `packet.ParsedPacket` type.
 
 ## Building
 
+Packet capture uses libpcap through cgo
+([gopacket/pcap](https://pkg.go.dev/github.com/gopacket/gopacket/pcap)), so
+you need a C compiler and the libpcap development headers to build or test:
+
+```
+sudo apt install libpcap-dev      # Debian/Ubuntu
+sudo dnf install libpcap-devel    # Fedora
+brew install libpcap              # macOS (the system libpcap usually works too)
+```
+
+Live capture also needs raw-socket privileges. Instead of running as root,
+grant them to the binary once after each build:
+
+```
+sudo setcap cap_net_raw,cap_net_admin=eip bin/ids
+```
+
+Only Ethernet interfaces are supported. The Linux `any` device and macOS
+loopback use other link types and are rejected at startup.
+
 ```
 make build   # go build -o bin/ids ./cmd/ids
 make test    # go test ./...
