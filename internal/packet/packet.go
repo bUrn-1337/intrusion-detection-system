@@ -1,0 +1,293 @@
+// Package packet defines ParsedPacket, the shared record passed between
+// pipeline stages.
+//
+// ParsedPacket is the ONLY contract between pipeline stages. Each field is
+// written by exactly one stage (documented per field below) and may be read
+// by any later stage. The exceptions are ParseErrors, which any stage may
+// append to through AddError, and the reason keys in AppFields, which are
+// only written through AddAppReason.
+//
+// Every module depends on the exact shape of this struct. No stage may add,
+// remove, or change a field without updating this file and notifying the
+// team first.
+//
+// This package must not import any other internal package.
+package packet
+
+import (
+	"net"
+	"time"
+)
+
+// Values for ParsedPacket.EthType.
+const (
+	EthTypeIPv4 uint16 = 0x0800
+	EthTypeARP  uint16 = 0x0806
+	EthTypeIPv6 uint16 = 0x86DD
+)
+
+// Values for ParsedPacket.ARPOp. 0 means the packet is not ARP.
+const (
+	ARPRequest uint16 = 1
+	ARPReply   uint16 = 2
+)
+
+// Values for ParsedPacket.L4Proto. The empty string means Module 3 has not
+// set it.
+const (
+	L4TCP   = "TCP"
+	L4UDP   = "UDP"
+	L4ICMP  = "ICMP"
+	L4Other = "OTHER"
+)
+
+// Values for ParsedPacket.AppProtocol. The empty string means Module 4 has
+// not set it.
+const (
+	AppHTTP    = "HTTP"
+	AppDNS     = "DNS"
+	AppFTP     = "FTP"
+	AppTLS     = "TLS"
+	AppUnknown = "UNKNOWN"
+)
+
+// Kinds accepted by AddAppReason. A reason of kind K is stored under the
+// AppFields key K + "_reason".
+const (
+	ReasonMalformed  = "malformed"
+	ReasonSuspicious = "suspicious"
+)
+
+// reasonSep separates multiple reasons stored under one AppFields key.
+const reasonSep = ";"
+
+// TCPFlags holds the TCP control bits that the rule engine matches on.
+type TCPFlags struct {
+	SYN, ACK, FIN, RST, PSH, URG bool
+}
+
+// ParsedPacket is one captured frame, filled in stage by stage as it moves
+// through the pipeline. Stages identify themselves by module number:
+// 1 capture, 2 parser/lower, 3 parser/upper, 4 parser/app.
+type ParsedPacket struct {
+	// ---- Module 1: capture ----
+
+	// Timestamp is when the packet was captured, taken from the capture
+	// source (pcap record header or kernel timestamp). It is not the time
+	// the packet was processed.
+	Timestamp time.Time
+	// CaptureLen is the number of bytes actually captured.
+	CaptureLen uint32
+	// WireLen is the packet's original length on the wire. If CaptureLen is
+	// less than WireLen, the capture was truncated (snaplen) and later
+	// stages must expect short buffers.
+	WireLen uint32
+	// RawData is the full captured frame, starting at the Ethernet header.
+	// Its length is CaptureLen. It must be a copy owned by this packet,
+	// never a buffer the capture library reuses for the next packet
+	// (for example, gopacket's ZeroCopyReadPacketData). Later stages read
+	// it but must not modify it.
+	RawData []byte
+
+	// ---- Module 2: Ethernet / IP / ARP ----
+
+	// EthSrc is the Ethernet source MAC address. It is nil until Module 2
+	// parses the frame.
+	EthSrc net.HardwareAddr
+	// EthDst is the Ethernet destination MAC address. It is nil until
+	// Module 2 parses the frame.
+	EthDst net.HardwareAddr
+	// EthType is the EtherType of the frame, e.g. EthTypeIPv4, EthTypeIPv6
+	// or EthTypeARP. If the frame has VLAN tags, this is the EtherType
+	// after the last tag.
+	EthType uint16
+	// L3Offset is the byte offset in RawData where the IP or ARP header
+	// starts, after the Ethernet header and any VLAN tags. It is -1 if not
+	// determined.
+	L3Offset int
+	// L4Offset is the byte offset in RawData where the TCP, UDP or ICMP
+	// header starts, after IPv4 options or IPv6 extension headers. It is -1
+	// if not determined, which includes ARP, a truncated IP header, and
+	// non-first fragments (FragOffset > 0), which carry no L4 header.
+	L4Offset int
+
+	// IPVersion is 4 or 6, or 0 if no IP header was parsed (for example,
+	// for ARP or a truncated frame). None of the other IP* fields, or the
+	// fragmentation fields, mean anything while it is 0.
+	IPVersion uint8
+	// IPSrc is the source address: 4 bytes for IPv4, 16 bytes for IPv6.
+	IPSrc net.IP
+	// IPDst is the destination address: 4 bytes for IPv4, 16 bytes for IPv6.
+	IPDst net.IP
+	// IPTTL is the IPv4 TTL or the IPv6 hop limit.
+	IPTTL uint8
+	// IPProto is the IPv4 protocol number or, for IPv6, the final Next
+	// Header value after any extension headers (6=TCP, 17=UDP, 1=ICMP,
+	// 58=ICMPv6).
+	IPProto uint8
+	// IPTotalLen is the IPv4 Total Length field, or the IPv6 Payload Length
+	// plus 40 for the fixed header. It is taken from the header, not from
+	// RawData, so it can be larger than what was captured.
+	IPTotalLen uint32
+	// IPChecksumValid reports whether the IPv4 header checksum verified.
+	// IPv6 has no header checksum, so Module 2 sets it to true for IPv6.
+	// That way false always means a real failure whenever IPVersion != 0.
+	IPChecksumValid bool
+
+	// IPID is the IPv4 Identification field (16 bits) or, for IPv6, the
+	// Fragment extension header's Identification (32 bits). It is 0 for
+	// IPv6 packets without a Fragment header.
+	IPID uint32
+	// FragOffset is the fragment offset in bytes, already multiplied by 8.
+	FragOffset uint16
+	// MoreFragments is the IPv4 MF flag or the IPv6 Fragment header M flag.
+	MoreFragments bool
+	// IPFragmented is a convenience flag equal to
+	// (MoreFragments || FragOffset > 0). Module 3 should not expect a
+	// complete L4 header in non-first fragments.
+	IPFragmented bool
+
+	// ARPOp is ARPRequest or ARPReply, or 0 if the packet is not ARP. The
+	// ARP* address fields are only meaningful when it is non-zero.
+	ARPOp uint16
+	// ARPSenderMAC is the ARP sender hardware address.
+	ARPSenderMAC net.HardwareAddr
+	// ARPTargetMAC is the ARP target hardware address.
+	ARPTargetMAC net.HardwareAddr
+	// ARPSenderIP is the ARP sender protocol address (4 bytes for IPv4).
+	ARPSenderIP net.IP
+	// ARPTargetIP is the ARP target protocol address (4 bytes for IPv4).
+	ARPTargetIP net.IP
+
+	// ---- Module 3: TCP / UDP / ICMP ----
+
+	// L4Proto is one of L4TCP, L4UDP, L4ICMP or L4Other, or "" if Module 3
+	// has not run. ICMPv6 is reported as L4ICMP.
+	L4Proto string
+	// PayloadOffset is the byte offset in RawData where the application
+	// payload starts, after the TCP header and options or the UDP or ICMP
+	// header. It is -1 if not determined. Read the payload through
+	// Payload(), not by slicing RawData directly.
+	PayloadOffset int
+	// SrcPort is the TCP or UDP source port. It is 0 for other protocols.
+	SrcPort uint16
+	// DstPort is the TCP or UDP destination port. It is 0 for other
+	// protocols.
+	DstPort uint16
+	// TCPFlags holds the TCP control bits. All are false unless L4Proto is
+	// L4TCP.
+	TCPFlags TCPFlags
+	// TCPSeq is the TCP sequence number. It is only meaningful for TCP.
+	TCPSeq uint32
+	// TCPAck is the TCP acknowledgment number. It is only meaningful when
+	// TCPFlags.ACK is set.
+	TCPAck uint32
+	// TCPWindow is the raw TCP window size, without window scaling applied.
+	// It is only meaningful for TCP.
+	TCPWindow uint16
+	// UDPLen is the UDP Length field (header plus data), taken from the
+	// header. It is only meaningful for UDP.
+	UDPLen uint16
+	// ICMPType is the ICMP (or ICMPv6) type. It is only meaningful when
+	// L4Proto is L4ICMP.
+	ICMPType uint8
+	// ICMPCode is the ICMP (or ICMPv6) code. It is only meaningful when
+	// L4Proto is L4ICMP.
+	ICMPCode uint8
+
+	// ---- Module 4: HTTP / DNS / FTP / TLS ----
+
+	// AppProtocol is one of AppHTTP, AppDNS, AppFTP, AppTLS or AppUnknown,
+	// or "" if Module 4 has not run.
+	AppProtocol string
+	// AppFields holds protocol-specific values. It is nil until something is
+	// written. Write it only through SetAppField and AddAppReason, which
+	// allocate it when needed. Reading a nil map is safe. Missing keys mean
+	// "not present in the packet".
+	//
+	// Keys by protocol:
+	//   HTTP: "method", "uri", "version", "host", "user_agent",
+	//         "status_code", "content_type", "content_length",
+	//         "auth_basic" ("true" if an Authorization: Basic header is
+	//         present), "request_complete" ("true" once the blank line
+	//         ending the headers is seen)
+	//   DNS:  "id", "qname", "qtype", "qclass", "is_response", "rcode",
+	//         "qdcount", "ancount"
+	//   FTP:  "command", "argument", "response_code"
+	//   TLS:  "sni" (ClientHello server name only, no decryption)
+	//   All:  "malformed_reason", "suspicious_reason". Write these only
+	//         through AddAppReason, never through SetAppField.
+	//
+	// Add a new key here before any module starts writing it.
+	AppFields map[string]string
+
+	// ---- Any stage ----
+
+	// ParseErrors lists problems found while parsing malformed or truncated
+	// input. Append only through AddError. When a parser hits bad input, it
+	// records an error and stops parsing that layer. It must never panic or
+	// drop the packet.
+	ParseErrors []string
+}
+
+// NewParsedPacket returns a packet with only the capture-stage (Module 1)
+// fields set, except RawData, which the caller assigns. L3Offset, L4Offset
+// and PayloadOffset are set to -1 ("not determined"). Every other field is
+// left at its zero value.
+func NewParsedPacket(ts time.Time, captureLen, wireLen uint32) *ParsedPacket {
+	return &ParsedPacket{
+		Timestamp:     ts,
+		CaptureLen:    captureLen,
+		WireLen:       wireLen,
+		L3Offset:      -1,
+		L4Offset:      -1,
+		PayloadOffset: -1,
+	}
+}
+
+// Payload returns RawData[PayloadOffset:]. It returns nil if PayloadOffset
+// is negative or past the end of RawData, and never panics. If
+// PayloadOffset equals len(RawData), the result is empty.
+func (p *ParsedPacket) Payload() []byte {
+	if p.PayloadOffset < 0 || p.PayloadOffset > len(p.RawData) {
+		return nil
+	}
+	return p.RawData[p.PayloadOffset:]
+}
+
+// AddError records a parse error on the packet. Every parser module should
+// call it instead of changing ParseErrors directly, so that error handling
+// (counters, logging) can be added here later without touching callers.
+func (p *ParsedPacket) AddError(msg string) {
+	p.ParseErrors = append(p.ParseErrors, msg)
+}
+
+// HasErrors reports whether any stage has recorded a parse error.
+func (p *ParsedPacket) HasErrors() bool {
+	return len(p.ParseErrors) > 0
+}
+
+// SetAppField sets AppFields[key] = value, allocating the map if it is nil.
+// Do not use it for the reason keys; use AddAppReason instead.
+func (p *ParsedPacket) SetAppField(key, value string) {
+	if p.AppFields == nil {
+		p.AppFields = make(map[string]string)
+	}
+	p.AppFields[key] = value
+}
+
+// AddAppReason appends reason to AppFields[kind + "_reason"], where kind is
+// ReasonMalformed or ReasonSuspicious. Multiple reasons are kept in order,
+// separated by ";", so a reason must not itself contain ";". An unknown
+// kind is recorded with AddError and the reason is dropped.
+func (p *ParsedPacket) AddAppReason(kind, reason string) {
+	if kind != ReasonMalformed && kind != ReasonSuspicious {
+		p.AddError("packet: AddAppReason: unknown kind " + kind)
+		return
+	}
+	key := kind + "_reason"
+	if prev := p.AppFields[key]; prev != "" {
+		reason = prev + reasonSep + reason
+	}
+	p.SetAppField(key, reason)
+}
