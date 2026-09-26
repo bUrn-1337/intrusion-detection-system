@@ -238,17 +238,30 @@ type ParsedPacket struct {
 	// "not present in the packet".
 	//
 	// Keys by protocol:
-	//   HTTP: "method", "uri", "version", "host", "user_agent",
-	//         "status_code", "content_type", "content_length",
-	//         "auth_basic" ("true" if an Authorization: Basic header is
-	//         present), "request_complete" ("true" once the blank line
-	//         ending the headers is seen)
-	//   DNS:  "id", "qname", "qtype", "qclass", "is_response", "rcode",
-	//         "qdcount", "ancount"
-	//   FTP:  "command", "argument", "response_code"
-	//   TLS:  "sni" (ClientHello server name only, no decryption)
+	//   HTTP: "method", "uri", "uri_decoded" (uri percent-decoded once),
+	//         "version" ("1.1", or "2.0" for the h2c preface), "host",
+	//         "user_agent", "status_code", "content_type",
+	//         "content_length", "auth_basic" ("true" if an
+	//         Authorization: Basic header is present), "request_complete"
+	//         ("true" if the blank line ending the headers is in this
+	//         segment; set for requests and responses)
+	//   DNS:  "id", "qname" (first question, lowercased), "qtype"
+	//         (number), "qtype_name" ("A", "AAAA", ... for common types),
+	//         "qclass", "is_response", "rcode", "qdcount", "ancount",
+	//         "nscount", "arcount", "dns_len" (message length in bytes,
+	//         without the TCP length prefix)
+	//   FTP:  "command" (uppercased), "argument", "response_code"
+	//   TLS:  "sni" (ClientHello server name, lowercased; no decryption),
+	//         "sni_status" ("found", "absent" for a complete ClientHello
+	//         without one, or "truncated" when the ClientHello continues
+	//         past this segment and no server name was seen)
 	//   All:  "malformed_reason", "suspicious_reason". Write these only
 	//         through AddAppReason, never through SetAppField.
+	//
+	// Credentials are never stored, in AppFields or in ParseErrors: an
+	// Authorization header sets only "auth_basic", and the argument of an
+	// FTP PASS command is stored as "<redacted>". Reasons and errors must
+	// not quote payload bytes.
 	//
 	// Add a new key here before any module starts writing it.
 	AppFields map[string]string
