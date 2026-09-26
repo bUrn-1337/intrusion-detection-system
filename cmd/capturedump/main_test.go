@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/hex"
+	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/app"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/lower"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/upper"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/rules"
 )
 
 func TestDescribe(t *testing.T) {
@@ -145,6 +148,8 @@ func TestDescribeApp(t *testing.T) {
 			"DNS query abc.t.example TXT [suspicious: long high-entropy label (possible DNS tunnelling)]"},
 		{"http request", packet.AppHTTP, map[string]string{"method": "GET", "host": "example.com", "uri": "/path"},
 			"HTTP GET example.com /path"},
+		{"http basic auth", packet.AppHTTP, map[string]string{"method": "GET", "host": "example.com", "uri": "/", "auth_basic": "true"},
+			"HTTP GET example.com / auth"},
 		{"http request without host", packet.AppHTTP, map[string]string{"method": "GET", "uri": "/path"}, "HTTP GET /path"},
 		{"http response", packet.AppHTTP, map[string]string{"status_code": "200", "version": "1.1"}, "HTTP 200"},
 		{"h2c", packet.AppHTTP, map[string]string{"version": "2.0"}, "HTTP/2 preface"},
@@ -164,5 +169,48 @@ func TestDescribeApp(t *testing.T) {
 				t.Errorf("describeApp() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDescribeAlert(t *testing.T) {
+	t0 := time.Date(2026, 9, 25, 10, 0, 0, 0, time.UTC)
+	a := rules.Alert{
+		Time: t0, FirstSeen: t0, LastSeen: t0, SID: 1000001, Msg: "SYN flood", Severity: "high", Proto: "TCP",
+		SrcIP: "10.0.0.1", SrcPort: 40000, DstIP: "10.0.0.2", DstPort: 80, Count: 1, Kind: rules.KindAlert,
+		Details: map[string]string{"track": "by_dst", "ratio": "1.00"},
+	}
+	want := `ALERT [high] sid=1000001 "SYN flood" TCP 10.0.0.1:40000 -> 10.0.0.2:80 count=1 time=2026-09-25T10:00:00Z ratio=1.00 track=by_dst`
+	if got := describeAlert(a); got != want {
+		t.Errorf("alert\n got: %s\nwant: %s", got, want)
+	}
+	a.Kind, a.Count, a.LastSeen, a.Details = rules.KindSummary, 42, t0.Add(1500*time.Millisecond), nil
+	want = `SUMMARY [high] sid=1000001 "SYN flood" TCP 10.0.0.1:40000 -> 10.0.0.2:80 count=42 first=2026-09-25T10:00:00Z last=2026-09-25T10:00:01.5Z`
+	if got := describeAlert(a); got != want {
+		t.Errorf("summary\n got: %s\nwant: %s", got, want)
+	}
+	a = rules.Alert{Kind: rules.KindAlert, SID: 7, Msg: "m", Severity: "low", Proto: "ICMP", SrcIP: "2001:db8::1", DstIP: "2001:db8::2", Count: 1, Time: t0}
+	want = `ALERT [low] sid=7 "m" ICMP 2001:db8::1 -> 2001:db8::2 count=1 time=2026-09-25T10:00:00Z`
+	if got := describeAlert(a); got != want {
+		t.Errorf("icmp\n got: %s\nwant: %s", got, want)
+	}
+	a.Proto, a.SrcPort, a.DstPort = "UDP", 5353, 53
+	if got := describeAlert(a); !strings.Contains(got, "UDP [2001:db8::1]:5353 -> [2001:db8::2]:53 ") {
+		t.Errorf("ipv6 udp: %s", got)
+	}
+}
+
+func TestParseWhitelist(t *testing.T) {
+	got, err := parseWhitelist("10.1.2.3/8, 192.168.1.5,2001:db8::/32,::ffff:1.2.3.4")
+	want := []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("192.168.1.5/32"),
+		netip.MustParsePrefix("2001:db8::/32"), netip.MustParsePrefix("1.2.3.4/32"),
+	}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("parseWhitelist = %v, %v", got, err)
+	}
+	for _, bad := range []string{"", "10.0.0.0/33", "host", "10.0.0.1,"} {
+		if _, err := parseWhitelist(bad); err == nil {
+			t.Errorf("parseWhitelist(%q) accepted", bad)
+		}
 	}
 }

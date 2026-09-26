@@ -7,9 +7,15 @@
 // then any parse errors. On Ctrl-C (or EOF for a file) it prints the final Stats. It
 // is for manual testing only.
 //
+// With -rules, every frame also goes through the Module 5 rule engine and
+// its alerts are printed as ALERT and SUMMARY lines after the frame that
+// caused them; -alerts-only prints just those. SIGHUP reloads the rules
+// file (a file with errors is reported and the old rules are kept). At
+// exit the engine is flushed, so pending dedup summaries are printed.
+//
 // Usage:
 //
-//	capturedump -i eth0 [-f "tcp port 80"]
+//	capturedump -i eth0 [-f "tcp port 80"] [-rules rules.conf [-alerts-only] [-whitelist 10.0.0.0/8,192.168.1.5]]
 //	capturedump -r trace.pcap
 //
 // Example output:
@@ -18,14 +24,18 @@
 //	2026-09-25T10:00:00.153456Z  len=85  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=17 ttl=64  UDP 40000 -> 53 len=51  DNS query google.com A
 //	2026-09-25T10:00:00.173456Z  len=98  02:00:00:00:00:0b -> 02:00:00:00:00:0a  IPv4 10.0.0.2 -> 10.0.0.1 proto=1 ttl=64  ICMP Echo Reply
 //	2026-09-25T10:00:00.223456Z  len=42  02:00:00:00:00:0a -> ff:ff:ff:ff:ff:ff  ARP request who-has 10.0.0.2 tell 10.0.0.1
+//	ALERT [high] sid=1000001 "SYN flood against one destination" TCP 10.0.0.1:40000 -> 10.0.0.2:80 count=1 time=2026-09-25T10:00:03.99Z detector=syn_flood ...
+//	SUMMARY [high] sid=1000001 "SYN flood against one destination" TCP 10.0.0.1:40000 -> 10.0.0.2:80 count=401 first=2026-09-25T10:00:03.99Z last=2026-09-25T10:00:07.99Z ...
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -35,7 +45,14 @@ import (
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/app"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/lower"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/upper"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/rules"
 )
+
+type options struct {
+	rules      string
+	alertsOnly bool
+	whitelist  []netip.Prefix
+}
 
 func main() {
 	cfg := capture.DefaultConfig()
@@ -45,15 +62,37 @@ func main() {
 	flag.IntVar(&cfg.Snaplen, "snaplen", cfg.Snaplen, "max bytes captured per frame (live only)")
 	flag.IntVar(&cfg.QueueSize, "queue", cfg.QueueSize, "output queue size")
 	flag.BoolVar(&cfg.Promisc, "promisc", cfg.Promisc, "promiscuous mode (live only)")
+	var opt options
+	flag.StringVar(&opt.rules, "rules", "", "rules file; prints ALERT and SUMMARY lines (SIGHUP reloads it)")
+	flag.BoolVar(&opt.alertsOnly, "alerts-only", false, "with -rules, print only alerts, not every frame")
+	flag.Func("whitelist", "comma-separated source `CIDR`s or addresses that never alert (with -rules)", func(v string) error {
+		wl, err := parseWhitelist(v)
+		opt.whitelist = append(opt.whitelist, wl...)
+		return err
+	})
 	flag.Parse()
+	if opt.rules == "" && (opt.alertsOnly || opt.whitelist != nil) {
+		fmt.Fprintln(os.Stderr, "capturedump: -alerts-only and -whitelist need -rules")
+		os.Exit(2)
+	}
 
-	if err := run(cfg); err != nil {
+	if err := run(cfg, opt); err != nil {
 		fmt.Fprintln(os.Stderr, "capturedump:", err)
 		os.Exit(1)
 	}
 }
 
-func run(cfg capture.Config) error {
+func run(cfg capture.Config, opt options) error {
+	var e *rules.Engine
+	if opt.rules != "" {
+		rs, err := rules.Load(opt.rules)
+		if err != nil {
+			return err
+		}
+		e = rules.NewEngine(rs, rules.EngineConfig{Whitelist: opt.whitelist})
+		fmt.Fprintf(os.Stderr, "loaded %d rules from %s\n", rs.Len(), opt.rules)
+	}
+
 	c, err := capture.New(cfg)
 	if err != nil {
 		return err
@@ -63,17 +102,107 @@ func run(cfg capture.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if e != nil {
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		defer signal.Stop(hup)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-hup:
+					if err := e.Reload(opt.rules); err != nil {
+						fmt.Fprintf(os.Stderr, "reload failed, keeping the previous %d rules:\n%v\n", e.Stats().Rules, err)
+					} else {
+						fmt.Fprintf(os.Stderr, "reloaded %d rules from %s\n", e.Stats().Rules, opt.rules)
+					}
+				}
+			}
+		}()
+	}
+
 	for p := range c.Start(ctx) {
 		lower.Parse(p)
 		upper.Parse(p)
 		app.Parse(p)
-		fmt.Println(describe(p))
+		if !opt.alertsOnly {
+			fmt.Println(describe(p))
+		}
+		if e != nil {
+			printAlerts(e.Process(p))
+		}
 	}
 
 	s := c.Stats()
 	fmt.Fprintf(os.Stderr, "captured=%d kernel_dropped=%d queue_dropped=%d queue_depth=%d\n",
 		s.Captured, s.KernelDropped, s.QueueDropped, s.QueueDepth)
+	if e != nil {
+		printAlerts(e.Flush())
+		es := e.Stats()
+		fmt.Fprintf(os.Stderr, "rules=%d packets=%d alerts=%d summaries=%d suppressed=%d passed=%d whitelisted=%d evictions=%d reloads=%d reload_fails=%d\n",
+			es.Rules, es.Packets, es.Alerts, es.Summaries, es.Suppressed, es.Passed, es.Whitelisted, es.Evictions, es.Reloads, es.ReloadFails)
+	}
 	return c.Err()
+}
+
+// parseWhitelist parses a comma-separated list of CIDR prefixes and
+// single addresses.
+func parseWhitelist(v string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, item := range strings.Split(v, ",") {
+		item = strings.TrimSpace(item)
+		if p, err := netip.ParsePrefix(item); err == nil {
+			out = append(out, p.Masked())
+		} else if a, err := netip.ParseAddr(item); err == nil {
+			a = a.Unmap()
+			out = append(out, netip.PrefixFrom(a, a.BitLen()))
+		} else {
+			return nil, fmt.Errorf("bad whitelist entry %q", item)
+		}
+	}
+	return out, nil
+}
+
+func printAlerts(as []rules.Alert) {
+	for _, a := range as {
+		fmt.Println(describeAlert(a))
+	}
+}
+
+// describeAlert formats an alert or summary as one line.
+func describeAlert(a rules.Alert) string {
+	var b strings.Builder
+	kind := "ALERT"
+	if a.Kind == rules.KindSummary {
+		kind = "SUMMARY"
+	}
+	fmt.Fprintf(&b, "%s [%s] sid=%d %q %s %s -> %s count=%d", kind, a.Severity, a.SID, a.Msg, a.Proto,
+		endpoint(a.SrcIP, a.SrcPort, a.Proto), endpoint(a.DstIP, a.DstPort, a.Proto), a.Count)
+	if a.Kind == rules.KindSummary {
+		fmt.Fprintf(&b, " first=%s last=%s", a.FirstSeen.Format(time.RFC3339Nano), a.LastSeen.Format(time.RFC3339Nano))
+	} else {
+		fmt.Fprintf(&b, " time=%s", a.Time.Format(time.RFC3339Nano))
+	}
+	keys := make([]string, 0, len(a.Details))
+	for k := range a.Details {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(&b, " %s=%s", k, a.Details[k])
+	}
+	return b.String()
+}
+
+func endpoint(ip string, port uint16, proto string) string {
+	if proto != "TCP" && proto != "UDP" {
+		return ip
+	}
+	if strings.Contains(ip, ":") {
+		return fmt.Sprintf("[%s]:%d", ip, port)
+	}
+	return fmt.Sprintf("%s:%d", ip, port)
 }
 
 // describe formats one parsed frame as a single line.
@@ -197,6 +326,9 @@ func describeApp(p *packet.ParsedPacket) string {
 			s = "HTTP " + f["status_code"]
 		case f["method"] != "":
 			s = strings.Join(nonEmpty("HTTP", f["method"], f["host"], f["uri"]), " ")
+			if f["auth_basic"] == "true" {
+				s += " auth"
+			}
 		case f["version"] == "2.0":
 			s = "HTTP/2 preface"
 		default:
