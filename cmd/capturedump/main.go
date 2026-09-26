@@ -1,9 +1,10 @@
-// Command capturedump runs the Module 1 capturer and the Module 2 and 3
+// Command capturedump runs the Module 1 capturer and the Module 2, 3 and 4
 // parsers and prints one decoded line per frame: capture timestamp, wire
 // length (and captured length if truncated), Ethernet addresses, then the
 // IPv4, IPv6 or ARP summary or the EtherType, then the TCP, UDP or ICMP
-// summary (with [bad-l4csum] when the transport checksum is wrong), then any
-// parse errors. On Ctrl-C (or EOF for a file) it prints the final Stats. It
+// summary (with [bad-l4csum] when the transport checksum is wrong), then the
+// DNS, HTTP, FTP or TLS summary with any malformed or suspicious reasons,
+// then any parse errors. On Ctrl-C (or EOF for a file) it prints the final Stats. It
 // is for manual testing only.
 //
 // Usage:
@@ -14,6 +15,7 @@
 // Example output:
 //
 //	2026-09-25T10:00:00.123456Z  len=74  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=6 ttl=64  TCP 40000 -> 443 [SYN] seq=1000 ack=0 win=64240 len=0
+//	2026-09-25T10:00:00.153456Z  len=85  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=17 ttl=64  UDP 40000 -> 53 len=51  DNS query google.com A
 //	2026-09-25T10:00:00.173456Z  len=98  02:00:00:00:00:0b -> 02:00:00:00:00:0a  IPv4 10.0.0.2 -> 10.0.0.1 proto=1 ttl=64  ICMP Echo Reply
 //	2026-09-25T10:00:00.223456Z  len=42  02:00:00:00:00:0a -> ff:ff:ff:ff:ff:ff  ARP request who-has 10.0.0.2 tell 10.0.0.1
 package main
@@ -30,6 +32,7 @@ import (
 
 	"github.com/bUrn-1337/intrusion-detection-system/internal/capture"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/app"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/lower"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/upper"
 )
@@ -63,6 +66,7 @@ func run(cfg capture.Config) error {
 	for p := range c.Start(ctx) {
 		lower.Parse(p)
 		upper.Parse(p)
+		app.Parse(p)
 		fmt.Println(describe(p))
 	}
 
@@ -84,6 +88,9 @@ func describe(p *packet.ParsedPacket) string {
 		b.WriteString(describeL3(p))
 		if l4 := describeL4(p); l4 != "" {
 			b.WriteString("  " + l4)
+		}
+		if a := describeApp(p); a != "" {
+			b.WriteString("  " + a)
 		}
 	}
 	if p.HasErrors() {
@@ -157,4 +164,77 @@ func tcpFlags(f packet.TCPFlags) string {
 		}
 	}
 	return strings.Join(names, ",")
+}
+
+// describeApp summarizes the application-layer fields and appends any
+// malformed or suspicious reasons. It returns "" for AppUnknown payloads
+// with no reasons, and for packets app.Parse did not classify.
+func describeApp(p *packet.ParsedPacket) string {
+	f := p.AppFields
+	var s string
+	switch p.AppProtocol {
+	case packet.AppDNS:
+		switch {
+		case f["id"] == "":
+			s = "DNS"
+		case f["is_response"] == "true":
+			s = fmt.Sprintf("DNS response id=%s rcode=%s an=%s", f["id"], f["rcode"], f["ancount"])
+			if f["qname"] != "" {
+				s += " " + f["qname"]
+			}
+		case f["qname"] != "":
+			qtype := f["qtype_name"]
+			if qtype == "" {
+				qtype = "type " + f["qtype"]
+			}
+			s = fmt.Sprintf("DNS query %s %s", f["qname"], qtype)
+		default:
+			s = "DNS query id=" + f["id"]
+		}
+	case packet.AppHTTP:
+		switch {
+		case f["status_code"] != "":
+			s = "HTTP " + f["status_code"]
+		case f["method"] != "":
+			s = strings.Join(nonEmpty("HTTP", f["method"], f["host"], f["uri"]), " ")
+		case f["version"] == "2.0":
+			s = "HTTP/2 preface"
+		default:
+			s = "HTTP"
+		}
+	case packet.AppFTP:
+		if f["response_code"] != "" {
+			s = "FTP " + f["response_code"]
+		} else {
+			// PASS arguments are already "<redacted>" in AppFields.
+			s = strings.Join(nonEmpty("FTP", f["command"], f["argument"]), " ")
+		}
+	case packet.AppTLS:
+		switch f["sni_status"] {
+		case "found":
+			s = "TLS SNI " + f["sni"]
+		case "truncated":
+			s = "TLS SNI truncated"
+		case "absent":
+			s = "TLS ClientHello without SNI"
+		default:
+			s = "TLS"
+		}
+	}
+	for _, kind := range []string{packet.ReasonMalformed, packet.ReasonSuspicious} {
+		if r := f[kind+"_reason"]; r != "" {
+			s += fmt.Sprintf(" [%s: %s]", kind, r)
+		}
+	}
+	return strings.TrimSpace(s)
+}
+
+func nonEmpty(ss ...string) []string {
+	var out []string
+	for _, s := range ss {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

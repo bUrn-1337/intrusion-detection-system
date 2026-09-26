@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/app"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/lower"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/upper"
 )
@@ -42,7 +43,14 @@ func TestDescribe(t *testing.T) {
 			name: "ipv4 udp, no checksum",
 			hexData: ethIPv4 + "45000021123400004011" + "5496" + "0a0000010a000002" +
 				"9c400035000d0000" + "7175657279",
-			want: "len=47  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=17 ttl=64  UDP 40000 -> 53 len=13",
+			want: "len=47  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=17 ttl=64  UDP 40000 -> 53 len=13" +
+				`  DNS [malformed: message shorter than the 12-byte header]  errors=["dns: message shorter than the 12-byte header"]`,
+		},
+		{
+			name: "ipv4 udp dns query",
+			hexData: ethIPv4 + "45000038123400004011" + "547f" + "0a0000010a000002" +
+				"9c4000350024000012340100000100000000000006676f6f676c6503636f6d0000010001",
+			want: "len=70  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=17 ttl=64  UDP 40000 -> 53 len=36  DNS query google.com A",
 		},
 		{
 			name: "ipv4 icmp port unreachable",
@@ -101,6 +109,7 @@ func TestDescribe(t *testing.T) {
 			p.RawData = data
 			lower.Parse(p)
 			upper.Parse(p)
+			app.Parse(p)
 
 			got := describe(p)
 			const ts = "2026-09-25T10:00:00Z  "
@@ -109,6 +118,50 @@ func TestDescribe(t *testing.T) {
 			}
 			if got = strings.TrimPrefix(got, ts); got != tt.want {
 				t.Errorf("describe()\n got: %s\nwant: %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDescribeApp(t *testing.T) {
+	tests := []struct {
+		name   string
+		proto  string
+		fields map[string]string
+		want   string
+	}{
+		{"not classified", "", nil, ""},
+		{"unknown", packet.AppUnknown, nil, ""},
+		{"dns query", packet.AppDNS, map[string]string{"id": "1", "is_response": "false", "qname": "google.com", "qtype": "1", "qtype_name": "A"},
+			"DNS query google.com A"},
+		{"dns query, unnamed type", packet.AppDNS, map[string]string{"id": "1", "is_response": "false", "qname": "x.example", "qtype": "99"},
+			"DNS query x.example type 99"},
+		{"dns response", packet.AppDNS, map[string]string{"id": "4660", "is_response": "true", "rcode": "0", "ancount": "2", "qname": "google.com"},
+			"DNS response id=4660 rcode=0 an=2 google.com"},
+		{"dns malformed query", packet.AppDNS, map[string]string{"id": "6", "is_response": "false", "malformed_reason": "qname: compression loop"},
+			"DNS query id=6 [malformed: qname: compression loop]"},
+		{"dns suspicious", packet.AppDNS, map[string]string{"id": "2", "is_response": "false", "qname": "abc.t.example", "qtype": "16", "qtype_name": "TXT",
+			"suspicious_reason": "long high-entropy label (possible DNS tunnelling)"},
+			"DNS query abc.t.example TXT [suspicious: long high-entropy label (possible DNS tunnelling)]"},
+		{"http request", packet.AppHTTP, map[string]string{"method": "GET", "host": "example.com", "uri": "/path"},
+			"HTTP GET example.com /path"},
+		{"http request without host", packet.AppHTTP, map[string]string{"method": "GET", "uri": "/path"}, "HTTP GET /path"},
+		{"http response", packet.AppHTTP, map[string]string{"status_code": "200", "version": "1.1"}, "HTTP 200"},
+		{"h2c", packet.AppHTTP, map[string]string{"version": "2.0"}, "HTTP/2 preface"},
+		{"http malformed", packet.AppHTTP, map[string]string{"malformed_reason": "invalid request method"}, "HTTP [malformed: invalid request method]"},
+		{"ftp command", packet.AppFTP, map[string]string{"command": "USER", "argument": "alice"}, "FTP USER alice"},
+		{"ftp pass", packet.AppFTP, map[string]string{"command": "PASS", "argument": "<redacted>"}, "FTP PASS <redacted>"},
+		{"ftp reply", packet.AppFTP, map[string]string{"response_code": "230"}, "FTP 230"},
+		{"tls sni", packet.AppTLS, map[string]string{"sni": "example.com", "sni_status": "found"}, "TLS SNI example.com"},
+		{"tls truncated", packet.AppTLS, map[string]string{"sni_status": "truncated"}, "TLS SNI truncated"},
+		{"tls absent", packet.AppTLS, map[string]string{"sni_status": "absent"}, "TLS ClientHello without SNI"},
+		{"tls other record", packet.AppTLS, nil, "TLS"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &packet.ParsedPacket{AppProtocol: tt.proto, AppFields: tt.fields}
+			if got := describeApp(p); got != tt.want {
+				t.Errorf("describeApp() = %q, want %q", got, tt.want)
 			}
 		})
 	}
