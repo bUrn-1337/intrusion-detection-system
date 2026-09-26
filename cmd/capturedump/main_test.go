@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bUrn-1337/intrusion-detection-system/internal/logging"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/app"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/lower"
@@ -180,21 +181,21 @@ func TestDescribeAlert(t *testing.T) {
 		Details: map[string]string{"track": "by_dst", "ratio": "1.00"},
 	}
 	want := `ALERT [high] sid=1000001 "SYN flood" TCP 10.0.0.1:40000 -> 10.0.0.2:80 count=1 time=2026-09-25T10:00:00Z ratio=1.00 track=by_dst`
-	if got := describeAlert(a); got != want {
+	if got := logging.FormatAlert(a); got != want {
 		t.Errorf("alert\n got: %s\nwant: %s", got, want)
 	}
 	a.Kind, a.Count, a.LastSeen, a.Details = rules.KindSummary, 42, t0.Add(1500*time.Millisecond), nil
 	want = `SUMMARY [high] sid=1000001 "SYN flood" TCP 10.0.0.1:40000 -> 10.0.0.2:80 count=42 first=2026-09-25T10:00:00Z last=2026-09-25T10:00:01.5Z`
-	if got := describeAlert(a); got != want {
+	if got := logging.FormatAlert(a); got != want {
 		t.Errorf("summary\n got: %s\nwant: %s", got, want)
 	}
 	a = rules.Alert{Kind: rules.KindAlert, SID: 7, Msg: "m", Severity: "low", Proto: "ICMP", SrcIP: "2001:db8::1", DstIP: "2001:db8::2", Count: 1, Time: t0}
 	want = `ALERT [low] sid=7 "m" ICMP 2001:db8::1 -> 2001:db8::2 count=1 time=2026-09-25T10:00:00Z`
-	if got := describeAlert(a); got != want {
+	if got := logging.FormatAlert(a); got != want {
 		t.Errorf("icmp\n got: %s\nwant: %s", got, want)
 	}
 	a.Proto, a.SrcPort, a.DstPort = "UDP", 5353, 53
-	if got := describeAlert(a); !strings.Contains(got, "UDP [2001:db8::1]:5353 -> [2001:db8::2]:53 ") {
+	if got := logging.FormatAlert(a); !strings.Contains(got, "UDP [2001:db8::1]:5353 -> [2001:db8::2]:53 ") {
 		t.Errorf("ipv6 udp: %s", got)
 	}
 }

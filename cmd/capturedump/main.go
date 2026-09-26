@@ -35,12 +35,12 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/bUrn-1337/intrusion-detection-system/internal/capture"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/logging"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/app"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/lower"
@@ -166,43 +166,8 @@ func parseWhitelist(v string) ([]netip.Prefix, error) {
 
 func printAlerts(as []rules.Alert) {
 	for _, a := range as {
-		fmt.Println(describeAlert(a))
+		fmt.Println(logging.FormatAlert(a))
 	}
-}
-
-// describeAlert formats an alert or summary as one line.
-func describeAlert(a rules.Alert) string {
-	var b strings.Builder
-	kind := "ALERT"
-	if a.Kind == rules.KindSummary {
-		kind = "SUMMARY"
-	}
-	fmt.Fprintf(&b, "%s [%s] sid=%d %q %s %s -> %s count=%d", kind, a.Severity, a.SID, a.Msg, a.Proto,
-		endpoint(a.SrcIP, a.SrcPort, a.Proto), endpoint(a.DstIP, a.DstPort, a.Proto), a.Count)
-	if a.Kind == rules.KindSummary {
-		fmt.Fprintf(&b, " first=%s last=%s", a.FirstSeen.Format(time.RFC3339Nano), a.LastSeen.Format(time.RFC3339Nano))
-	} else {
-		fmt.Fprintf(&b, " time=%s", a.Time.Format(time.RFC3339Nano))
-	}
-	keys := make([]string, 0, len(a.Details))
-	for k := range a.Details {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		fmt.Fprintf(&b, " %s=%s", k, a.Details[k])
-	}
-	return b.String()
-}
-
-func endpoint(ip string, port uint16, proto string) string {
-	if proto != "TCP" && proto != "UDP" {
-		return ip
-	}
-	if strings.Contains(ip, ":") {
-		return fmt.Sprintf("[%s]:%d", ip, port)
-	}
-	return fmt.Sprintf("%s:%d", ip, port)
 }
 
 // describe formats one parsed frame as a single line.

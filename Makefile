@@ -1,11 +1,18 @@
-BINARY := ids
 BIN_DIR := bin
-PKG := ./cmd/$(BINARY)
 
-.PHONY: build test lint run clean
+.PHONY: build setcap test lint run clean
 
 build:
-	go build -o $(BIN_DIR)/$(BINARY) $(PKG)
+	go build -o $(BIN_DIR)/ids ./cmd/ids
+	go build -o $(BIN_DIR)/capturedump ./cmd/capturedump
+
+# Grants raw-socket capabilities for live capture. Rebuilding strips them,
+# so run this again after every build. setcap needs the capability text
+# before each file.
+CAPS := cap_net_raw,cap_net_admin=eip
+
+setcap:
+	sudo setcap $(CAPS) $(BIN_DIR)/ids $(CAPS) $(BIN_DIR)/capturedump
 
 test:
 	go test ./...
@@ -18,9 +25,9 @@ lint:
 		echo "staticcheck not installed; skipping (go install honnef.co/go/tools/cmd/staticcheck@latest)"; \
 	fi
 
-# Placeholder: cmd/ids is wired up in the integration step.
-run: build
-	./$(BIN_DIR)/$(BINARY) $(ARGS)
+# make run ARGS="-i eth0"   (does not rebuild, so capabilities are kept)
+run:
+	./$(BIN_DIR)/ids run $(ARGS)
 
 clean:
 	rm -rf $(BIN_DIR)
