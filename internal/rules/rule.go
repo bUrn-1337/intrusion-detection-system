@@ -64,9 +64,27 @@ const (
 	SeverityCritical = "critical"
 )
 
-// DetectSYNFlood is the value of the detect option for the SYN flood
-// detector.
-const DetectSYNFlood = "syn_flood"
+// Values of the detect option.
+const (
+	DetectSYNFlood   = "syn_flood"
+	DetectPortScan   = "port_scan"
+	DetectHostSweep  = "host_sweep"
+	DetectPingSweep  = "ping_sweep"
+	DetectTTLAnomaly = "ttl_anomaly"
+	DetectFragAttack = "frag_attack"
+	DetectARPSpoof   = "arp_spoof"
+	DetectUDPFlood   = "udp_flood"
+	DetectICMPFlood  = "icmp_flood"
+	DetectICMPTunnel = "icmp_tunnel"
+)
+
+// Values of the frag_attack kind option.
+const (
+	FragOverlap  = "overlap"
+	FragTiny     = "tiny"
+	FragOversize = "oversize"
+	FragFlood    = "flood"
+)
 
 // Rule is one parsed rule. The exported fields describe it; the matching
 // criteria are unexported and only used by the engine.
@@ -80,7 +98,7 @@ type Rule struct {
 	Msg      string
 	Severity string
 	Category string
-	Detect   string // "" for a per-packet rule, or DetectSYNFlood
+	Detect   string // "" for a per-packet rule, or one of the Detect* names
 
 	idx   int    // position in RuleSet.rules, used to find per-rule state
 	text  string // the rule line with whitespace collapsed; identifies an unchanged rule across reloads
@@ -93,6 +111,17 @@ type Rule struct {
 	flags     uint8 // tcpFlag* bits
 	flagsPlus bool  // "S+": at least these
 
+	sameIP, samePort bool
+	ethDst           uint8 // ethBroadcast, ethMulticast, ethZero, or 0 for no check
+	ethDstNeg        bool  // eth_dst:!value
+	hasIType         bool
+	itype            uint8
+	hasICode         bool
+	icode            uint8
+	ttl              ttlCheck
+	dsize            dsizeCheck
+	arpOp            uint16 // packet.ARPRequest or packet.ARPReply, or 0 for no check
+
 	contents   []contentMatch
 	appProto   string // packet.AppDNS etc., or ""
 	appFields  []appField
@@ -100,9 +129,74 @@ type Rule struct {
 
 	filter *windowSpec // detection_filter, or nil
 
-	// Detector parameters (Detect != "").
+	// Detector parameters (Detect != ""). The scan detectors use only
+	// detect.seconds; they always track by source.
 	detect   windowSpec
-	minRatio float64
+	minRatio float64 // syn_flood
+	maxPorts int     // syn_flood max_distinct_ports
+	distinct int     // port_scan distinct_ports, host_sweep and ping_sweep distinct_hosts
+
+	// ttl_anomaly
+	minSamples int
+	maxHopDiff int
+	external   bool     // scope:external: only sources outside homeNet
+	homeNet    addrSpec // $HOME_NET, when external
+
+	// frag_attack
+	fragKind string
+	minSize  int // tiny: smallest normal non-final fragment payload
+
+	// arp_spoof
+	arpKind string
+
+	// udp_flood
+	metric        string  // MetricPackets or MetricBytes
+	maxReplyRatio float64 // max_reply_ratio
+
+	// icmp_flood
+	icmpKind string
+}
+
+// Values of Rule.ethDst.
+const (
+	ethBroadcast uint8 = iota + 1
+	ethMulticast
+	ethZero // 00:00:00:00:00:00, which Linux puts on loopback frames
+)
+
+// ttlCheck is the ttl option: op is 0 (no check), '<', '>' or '='.
+type ttlCheck struct {
+	op byte
+	n  uint8
+}
+
+func (c ttlCheck) match(ttl uint8) bool {
+	switch c.op {
+	case '<':
+		return ttl < c.n
+	case '>':
+		return ttl > c.n
+	}
+	return ttl == c.n
+}
+
+// dsizeCheck is the dsize option: op is 0 (no check), '=', '<', '>' or
+// 'r' for the inclusive range lo<>hi. '=', '<' and '>' compare with lo.
+type dsizeCheck struct {
+	op     byte
+	lo, hi int
+}
+
+func (c dsizeCheck) match(n int) bool {
+	switch c.op {
+	case '<':
+		return n < c.lo
+	case '>':
+		return n > c.lo
+	case 'r':
+		return c.lo <= n && n <= c.hi
+	}
+	return n == c.lo
 }
 
 // windowSpec is "count N within seconds S, tracked by address".
@@ -139,8 +233,24 @@ type RuleSet struct {
 
 	// groups[g] holds the pass and alert rules a packet of group g is
 	// checked against, in file order. "ip" rules are in every IP group.
-	groups   [numGroups]ruleGroup
-	synFlood []*Rule
+	groups    [numGroups]ruleGroup
+	detectors []*Rule // every detect: rule, in file order
+	// handshakes is true when some detector consumes handshake outcomes
+	// (syn_flood, port_scan, host_sweep, ttl_anomaly), so the tracker
+	// must run.
+	handshakes bool
+	// probes is true when some scan detector consumes per-packet probes.
+	probes bool
+	ttl    []*Rule // detect:ttl_anomaly rules
+	frags  []*Rule // detect:frag_attack rules; the fragment tracker runs when non-empty
+	arp    []*Rule // detect:arp_spoof rules; the ARP tables run when non-empty
+	udp    []*Rule // detect:udp_flood rules
+	icmp   []*Rule // detect:icmp_flood and icmp_tunnel rules
+	// echoReqs is true when some icmp_flood rule has kind
+	// unsolicited_reply, so outstanding echo requests are tracked.
+	echoReqs bool
+	// arpStatic holds the arpbind directives: IPv4 address -> MAC.
+	arpStatic map[netip.Addr]mac6
 }
 
 type ruleGroup struct{ pass, alert []*Rule }
@@ -185,12 +295,35 @@ func groupsFor(p Proto) []group {
 	}
 }
 
-func newRuleSet(file string, rules []*Rule) *RuleSet {
-	rs := &RuleSet{file: file, rules: rules}
+func newRuleSet(file string, rules []*Rule, static map[netip.Addr]mac6) *RuleSet {
+	rs := &RuleSet{file: file, rules: rules, arpStatic: static}
 	for i, r := range rules {
 		r.idx = i
 		if r.Detect != "" {
-			rs.synFlood = append(rs.synFlood, r)
+			rs.detectors = append(rs.detectors, r)
+			switch r.Detect {
+			case DetectSYNFlood:
+				rs.handshakes = true
+			case DetectPortScan, DetectHostSweep:
+				rs.handshakes, rs.probes = true, true
+			case DetectPingSweep:
+				rs.probes = true
+			case DetectTTLAnomaly:
+				// The handshake tracker tells completed flows apart.
+				rs.handshakes = true
+				rs.ttl = append(rs.ttl, r)
+			case DetectFragAttack:
+				rs.frags = append(rs.frags, r)
+			case DetectARPSpoof:
+				rs.arp = append(rs.arp, r)
+			case DetectUDPFlood:
+				rs.udp = append(rs.udp, r)
+			case DetectICMPFlood, DetectICMPTunnel:
+				rs.icmp = append(rs.icmp, r)
+				if r.icmpKind == ICMPUnsolicitedReply {
+					rs.echoReqs = true
+				}
+			}
 			continue
 		}
 		for _, g := range groupsFor(r.Proto) {
@@ -305,6 +438,12 @@ func (r *Rule) match(v *view) bool {
 	if !r.matchAddrs(v) {
 		return false
 	}
+	if r.sameIP && v.src != v.dst {
+		return false
+	}
+	if r.samePort && v.sport != v.dport {
+		return false
+	}
 	if r.hasFlags {
 		const mask = tcpFIN | tcpSYN | tcpRST | tcpPSH | tcpACK | tcpURG
 		got := v.flags & mask
@@ -313,6 +452,11 @@ func (r *Rule) match(v *view) bool {
 				return false
 			}
 		} else if got != r.flags {
+			return false
+		}
+	}
+	if r.ethDst != 0 || r.hasIType || r.hasICode || r.ttl.op != 0 || r.arpOp != 0 || r.dsize.op != 0 {
+		if !r.matchPacket(v) {
 			return false
 		}
 	}
@@ -341,6 +485,83 @@ func (r *Rule) match(v *view) bool {
 			hay = v.getLower()
 		}
 		if !bytes.Contains(hay, c.pat) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchPacket checks eth_dst, itype, icode, ttl, arp_op and dsize, which
+// need the real packet: a synthetic view never matches them.
+func (r *Rule) matchPacket(v *view) bool {
+	p := v.p
+	if p == nil {
+		return false
+	}
+	if r.ethDst != 0 && ethDstIs(p.EthDst, r.ethDst) == r.ethDstNeg {
+		return false
+	}
+	if r.hasIType || r.hasICode {
+		// PayloadOffset < 0: no ICMP header (a non-first fragment, or
+		// truncated), so there is no type to compare.
+		if v.g != gICMP || p.PayloadOffset < 0 {
+			return false
+		}
+		if r.hasIType && p.ICMPType != r.itype || r.hasICode && p.ICMPCode != r.icode {
+			return false
+		}
+	}
+	if r.ttl.op != 0 && (p.IPVersion == 0 || !r.ttl.match(p.IPTTL)) {
+		return false
+	}
+	if r.arpOp != 0 && (v.g != gARP || p.ARPOp != r.arpOp) {
+		return false
+	}
+	// PayloadOffset < 0: the payload's start is unknown (no transport
+	// header was decoded), so no size can be compared, not even 0.
+	if r.dsize.op != 0 && (p.PayloadOffset < 0 || !r.dsize.match(len(v.getPayload()))) {
+		return false
+	}
+	return true
+}
+
+// ethDstIs reports whether the destination MAC is of the given kind. A
+// packet without an Ethernet header (no 6-byte MAC) is of no kind.
+func ethDstIs(mac []byte, kind uint8) bool {
+	if len(mac) != 6 {
+		return false
+	}
+	switch kind {
+	case ethBroadcast:
+		return isBroadcast(mac)
+	case ethMulticast:
+		// The I/G bit (least significant bit of the first octet) marks a
+		// group address; broadcast is the all-ones group, kept separate.
+		return mac[0]&1 != 0 && !isBroadcast(mac)
+	case ethZero:
+		return isZeroMAC(mac)
+	}
+	return false
+}
+
+func isZeroMAC(mac []byte) bool {
+	if len(mac) != 6 {
+		return false
+	}
+	for _, b := range mac {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func isBroadcast(mac []byte) bool {
+	if len(mac) != 6 {
+		return false
+	}
+	for _, b := range mac {
+		if b != 0xff {
 			return false
 		}
 	}

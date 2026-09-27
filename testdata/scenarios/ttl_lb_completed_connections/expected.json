@@ -1,0 +1,5 @@
+{
+  "description": "One external server (203.0.113.80) answers five connections from 10.0.0.5, each over its own path: TTL stable within a connection, 5 or more hops apart between connections. Every connection completes its handshake, so no packet of it counts as anomalous (the SYN-ACK anomalies held back are dropped on completion). Nothing fires; ttl_spoofed_source still fires.",
+  "alerts": [],
+  "absent_sids": [1000601]
+}

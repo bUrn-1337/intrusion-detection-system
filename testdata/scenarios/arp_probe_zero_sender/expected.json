@@ -1,0 +1,5 @@
+{
+  "description": "DHCP clients probing addresses (RFC 5227): a probe from 0.0.0.0 for 10.1.1.40 is defended by a reply to 0.0.0.0, the client then probes and announces 10.1.1.41, and a second client probes twelve addresses from one MAC in 3.3s. Sender 0.0.0.0 teaches no binding and is checked for invalid_mac only, so nothing fires (no mac_change, no multi_ip, and the defending reply is solicited).",
+  "alerts": [],
+  "absent_sids": [1000801, 1000802, 1000803, 1000804, 1000805, 1000806, 1000807]
+}

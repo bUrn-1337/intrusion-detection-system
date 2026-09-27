@@ -1,0 +1,9 @@
+{
+  "description": "192.0.2.50 receives 600 Echo Replies in 3s from 150 hosts it never pinged, the far end of a smurf attack. The unsolicited reply rule fires at the 100th reply; the replies carry standard ping payloads, so the tunnel rule does not.",
+  "alerts": [
+    {"sid": 1000022, "kind": "alert", "dst_ip": "192.0.2.50", "count": [1, 1],
+     "details": {"detector": "icmp_flood", "kind": "unsolicited_reply", "track": "by_dst", "tracked_addr": "192.0.2.50", "packets": "100", "distinct_sources": "100"}},
+    {"sid": 1000022, "kind": "summary", "dst_ip": "192.0.2.50", "count": [501, 501]}
+  ],
+  "absent_sids": [1000901]
+}

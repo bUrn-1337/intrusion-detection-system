@@ -1,0 +1,9 @@
+{
+  "description": "An icmpsh-style shell between 10.0.0.5 (client) and 198.51.100.20: commands in Echo Requests, output in the Replies, one exchange every 2s. The text is low entropy but comes in many sizes; the tunnel rule fires at the 10th payload.",
+  "alerts": [
+    {"sid": 1000901, "kind": "alert", "src_ip": "198.51.100.20", "dst_ip": "10.0.0.5", "count": [1, 1],
+     "details": {"detector": "icmp_tunnel", "client": "10.0.0.5", "server": "198.51.100.20", "payloads": "10", "distinct_sizes": "6", "avg_entropy": "3.10"}},
+    {"sid": 1000901, "kind": "summary", "src_ip": "198.51.100.20", "count": [7, 7]}
+  ],
+  "absent_sids": [1000020, 1000021, 1000022]
+}

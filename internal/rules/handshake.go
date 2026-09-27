@@ -9,7 +9,8 @@ import (
 // handshakeTracker follows TCP three-way handshakes and reports how each
 // one ended: completed, or incomplete (reset, timed out, abandoned or
 // evicted). It is detector-neutral: the SYN flood detector counts its
-// outcomes, and the port-scan detector will reuse it.
+// outcomes, and the port_scan and host_sweep detectors count every
+// incomplete one except "evicted" as a probe (see scan.go).
 //
 // A pending handshake is keyed by (client ip, client port, server ip,
 // server port), where the client is the sender of the SYN.
@@ -54,6 +55,7 @@ type hsEntry struct {
 	seq       uint32 // client ISN
 	answered  bool
 	serverSeq uint32 // server ISN, valid when answered
+	synFin    bool   // the opening SYN also had FIN set
 }
 
 // hsEvent is the outcome of one handshake.
@@ -62,6 +64,8 @@ type hsEvent struct {
 	t        time.Time
 	complete bool
 	reason   string // for incomplete: "rst", "timeout", "reused", "evicted"
+	answered bool   // the server sent a valid SYN-ACK (the port is open)
+	synFin   bool   // the opening SYN also had FIN set
 }
 
 // tcpSegment is what the tracker needs from a TCP packet.
@@ -86,7 +90,7 @@ func (h *handshakeTracker) expire(now time.Time, out []hsEvent) []hsEvent {
 			break
 		}
 		h.remove(el)
-		out = append(out, hsEvent{key: e.key, t: deadline, reason: "timeout"})
+		out = append(out, e.event(deadline, "timeout"))
 	}
 	return out
 }
@@ -96,7 +100,7 @@ func (h *handshakeTracker) expireAll(out []hsEvent) []hsEvent {
 	for el := h.order.Front(); el != nil; el = h.order.Front() {
 		e := el.Value.(*hsEntry)
 		h.remove(el)
-		out = append(out, hsEvent{key: e.key, t: e.synAt.Add(h.timeout), reason: "timeout"})
+		out = append(out, e.event(e.synAt.Add(h.timeout), "timeout"))
 	}
 	return out
 }
@@ -113,7 +117,7 @@ func (h *handshakeTracker) observe(s *tcpSegment, now time.Time, out []hsEvent) 
 		for _, k := range []hsKey{fromServer, fromClient} {
 			if el, ok := h.m[k]; ok {
 				h.remove(el)
-				return append(out, hsEvent{key: k, t: now, reason: "rst"})
+				return append(out, el.Value.(*hsEntry).event(now, "rst"))
 			}
 		}
 	case syn && !ack:
@@ -123,15 +127,15 @@ func (h *handshakeTracker) observe(s *tcpSegment, now time.Time, out []hsEvent) 
 				return out // retransmission
 			}
 			h.remove(el)
-			out = append(out, hsEvent{key: fromClient, t: now, reason: "reused"})
+			out = append(out, e.event(now, "reused"))
 		}
 		if len(h.m) >= h.max {
 			old := h.order.Front()
 			h.remove(old)
 			h.stat.evictions.Add(1)
-			out = append(out, hsEvent{key: old.Value.(*hsEntry).key, t: now, reason: "evicted"})
+			out = append(out, old.Value.(*hsEntry).event(now, "evicted"))
 		}
-		h.m[fromClient] = h.order.PushBack(&hsEntry{key: fromClient, synAt: now, seq: s.seq})
+		h.m[fromClient] = h.order.PushBack(&hsEntry{key: fromClient, synAt: now, seq: s.seq, synFin: s.flags&tcpFIN != 0})
 		h.stat.keys.Add(1)
 	case syn && ack:
 		if el, ok := h.m[fromServer]; ok {
@@ -145,11 +149,16 @@ func (h *handshakeTracker) observe(s *tcpSegment, now time.Time, out []hsEvent) 
 			e := el.Value.(*hsEntry)
 			if e.answered && s.ack == e.serverSeq+1 {
 				h.remove(el)
-				out = append(out, hsEvent{key: fromClient, t: now, complete: true})
+				out = append(out, hsEvent{key: fromClient, t: now, complete: true, answered: true, synFin: e.synFin})
 			}
 		}
 	}
 	return out
+}
+
+// event is the incomplete outcome of e at t.
+func (e *hsEntry) event(t time.Time, reason string) hsEvent {
+	return hsEvent{key: e.key, t: t, reason: reason, answered: e.answered, synFin: e.synFin}
 }
 
 func (h *handshakeTracker) remove(el *list.Element) {
@@ -164,3 +173,9 @@ func (h *handshakeTracker) clear() {
 }
 
 func (h *handshakeTracker) len() int { return len(h.m) }
+
+// pending reports whether the handshake k is in the table.
+func (h *handshakeTracker) pending(k hsKey) bool {
+	_, ok := h.m[k]
+	return ok
+}

@@ -10,7 +10,7 @@ import (
 )
 
 // benchExtraRules are 22 rules of the kinds a small deployment adds to
-// rules.conf's 8, for 30 in total.
+// rules.conf's 43, for 65 in total.
 const benchExtraRules = `
 pass udp 10.0.0.53 53 -> 10.0.0.0/8 any (msg:"trusted resolver answers"; sid:2000001;)
 alert tcp any any -> any 23 (msg:"telnet"; flags:S; sid:2000002;)
@@ -92,8 +92,8 @@ func benchRules(tb testing.TB) *RuleSet {
 		tb.Fatal(err)
 	}
 	rs := mustParse(tb, string(def)+benchExtraRules)
-	if rs.Len() != 30 {
-		tb.Fatalf("%d rules, want 30", rs.Len())
+	if rs.Len() != 65 {
+		tb.Fatalf("%d rules, want 65", rs.Len())
 	}
 	return rs
 }

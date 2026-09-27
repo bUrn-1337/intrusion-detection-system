@@ -1,0 +1,12 @@
+{
+  "description": "ping -f -c 3000 from 203.0.113.50 to 192.0.2.10: 3000 standard 56-byte Echo Requests in 3s, all answered. Both echo flood rules fire at the 1000th request; the answered replies are not unsolicited and the standard payloads are no tunnel.",
+  "alerts": [
+    {"sid": 1000020, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"detector": "icmp_flood", "kind": "echo", "track": "by_dst", "tracked_addr": "192.0.2.10", "packets": "1000", "distinct_sources": "1"}},
+    {"sid": 1000020, "kind": "summary", "src_ip": "203.0.113.50", "count": [2001, 2001]},
+    {"sid": 1000021, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"detector": "icmp_flood", "kind": "echo", "track": "by_src", "tracked_addr": "203.0.113.50", "packets": "1000", "distinct_destinations": "1"}},
+    {"sid": 1000021, "kind": "summary", "src_ip": "203.0.113.50", "count": [2001, 2001]}
+  ],
+  "absent_sids": [1000022, 1000901, 1000902]
+}

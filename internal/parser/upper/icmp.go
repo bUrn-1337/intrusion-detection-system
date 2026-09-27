@@ -103,3 +103,12 @@ func ICMPLabel(ipVersion, typ, code uint8) string {
 	}
 	return t.name
 }
+
+// IsEcho reports whether typ is an echo request or reply: ICMP types 8
+// and 0, or ICMPv6 (v6 true) types 128 and 129.
+func IsEcho(typ uint8, v6 bool) bool {
+	if v6 {
+		return typ == 128 || typ == 129
+	}
+	return typ == 8 || typ == 0
+}

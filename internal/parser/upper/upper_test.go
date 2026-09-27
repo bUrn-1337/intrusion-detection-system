@@ -211,6 +211,8 @@ type result struct {
 	Win                uint16
 	UDPLen             uint16
 	ICMPType, ICMPCode uint8
+	EchoID, EchoSeq    uint16
+	HasEcho            bool
 	Csum               uint8
 	Payload            string
 }
@@ -221,6 +223,7 @@ func resultOf(p *packet.ParsedPacket) result {
 		SrcPort: p.SrcPort, DstPort: p.DstPort,
 		Flags: p.TCPFlags, Seq: p.TCPSeq, Ack: p.TCPAck, Win: p.TCPWindow,
 		UDPLen: p.UDPLen, ICMPType: p.ICMPType, ICMPCode: p.ICMPCode,
+		EchoID: p.ICMPEchoID, EchoSeq: p.ICMPEchoSeq, HasEcho: p.HasICMPEcho,
 		Csum: p.L4ChecksumStatus, Payload: string(p.Payload()),
 	}
 }
@@ -246,6 +249,14 @@ func wantUDP(udpLen uint16, payloadOff int, payload string, csum uint8) result {
 func wantICMP(typ, code uint8, payloadOff int, payload string, csum uint8) result {
 	return result{L4Proto: packet.L4ICMP, PayloadOffset: payloadOff, ICMPType: typ, ICMPCode: code,
 		Csum: csum, Payload: payload}
+}
+
+// wantEcho is the result for an echo request or reply built from
+// echoBody's id 0x1234 and seq 1: the payload starts after them.
+func wantEcho(typ uint8, payloadOff int, payload string, csum uint8) result {
+	r := wantICMP(typ, 0, payloadOff, payload, csum)
+	r.EchoID, r.EchoSeq, r.HasEcho = 0x1234, 1, true
+	return r
 }
 
 var (
@@ -494,27 +505,52 @@ func parseCases() []parseCase {
 		{
 			name:  "icmp echo request",
 			frame: seal(ip4(1, icmp(8, 0, echoBody), nil)),
-			want:  wantICMP(8, 0, 38, string(echoBody), valid),
+			want:  wantEcho(8, 42, "ping", valid),
 		},
 		{
 			name:  "icmp invalid checksum",
 			frame: corrupt(ip4(1, icmp(8, 0, echoBody), nil)),
-			want:  wantICMP(8, 0, 38, string(echoBody), invalid),
+			want:  wantEcho(8, 42, "ping", invalid),
 		},
 		{
 			name:  "icmp in a padded frame",
 			frame: pad60(seal(ip4(1, icmp(0, 0, echoBody[:4]), nil))),
-			want:  wantICMP(0, 0, 38, string(echoBody[:4]), valid),
+			want:  wantEcho(0, 42, "", valid),
+		},
+		{
+			name:  "icmp echo too short for id and seq",
+			frame: seal(ip4(1, icmp(8, 0, echoBody[:3]), nil)),
+			want:  wantICMP(8, 0, 38, string(echoBody[:3]), valid),
+		},
+		{
+			name:  "icmp echo code is not checked",
+			frame: seal(ip4(1, icmp(0, 5, echoBody), nil)),
+			want:  func() result { r := wantEcho(0, 42, "ping", valid); r.ICMPCode = 5; return r }(),
+		},
+		{
+			name:  "icmp timestamp request is not an echo",
+			frame: seal(ip4(1, icmp(13, 0, echoBody), nil)),
+			want:  wantICMP(13, 0, 38, string(echoBody), valid),
 		},
 		{
 			name:  "icmpv6 echo request",
 			frame: seal(ip6(58, nil, icmp(128, 0, echoBody))),
-			want:  wantICMP(128, 0, 58, string(echoBody), valid),
+			want:  wantEcho(128, 62, "ping", valid),
+		},
+		{
+			name:  "icmpv6 echo reply",
+			frame: seal(ip6(58, nil, icmp(129, 0, echoBody))),
+			want:  wantEcho(129, 62, "ping", valid),
+		},
+		{
+			name:  "icmpv6 type 8 is not an echo",
+			frame: seal(ip6(58, nil, icmp(8, 0, echoBody))),
+			want:  wantICMP(8, 0, 58, string(echoBody), valid),
 		},
 		{
 			name:  "icmpv6 invalid checksum",
 			frame: corrupt(ip6(58, nil, icmp(128, 0, echoBody))),
-			want:  wantICMP(128, 0, 58, string(echoBody), invalid),
+			want:  wantEcho(128, 62, "ping", invalid),
 		},
 		{
 			name:  "icmpv6 neighbor solicitation",
@@ -666,6 +702,12 @@ func checkInvariants(t *testing.T, p *packet.ParsedPacket, orig []byte) {
 	if p.L4Offset < 0 && (p.PayloadOffset != -1 || p.SrcPort != 0 || p.DstPort != 0 ||
 		p.ICMPType != 0 || p.L4ChecksumStatus != packet.L4ChecksumUnchecked) {
 		t.Errorf("transport fields set without a transport header: %+v", resultOf(p))
+	}
+	if p.ICMPInnerSrc != nil && (p.L4Proto != packet.L4ICMP || len(p.ICMPInnerSrc) != len(p.IPSrc) || len(p.ICMPInnerDst) != len(p.IPDst)) {
+		t.Errorf("ICMP inner %v -> %v on a %q packet from %v", p.ICMPInnerSrc, p.ICMPInnerDst, p.L4Proto, p.IPSrc)
+	}
+	if p.ICMPInnerSrc == nil && (p.ICMPInnerDst != nil || p.ICMPInnerHasPorts || p.ICMPInnerProto != 0) {
+		t.Errorf("ICMP inner fields set without ICMPInnerSrc")
 	}
 	if pl := p.Payload(); p.PayloadOffset >= 0 && len(pl) > p.IPEnd()-p.PayloadOffset {
 		t.Errorf("Payload() has %d bytes, more than the IP packet allows", len(pl))

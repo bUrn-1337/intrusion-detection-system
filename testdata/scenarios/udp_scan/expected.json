@@ -1,0 +1,9 @@
+{
+  "description": "203.0.113.50 sends UDP datagrams to ports 1-60 of 192.0.2.10; 58 closed ports answer ICMP port unreachable, 53 answers with DNS, 7 stays silent. Each port unreachable counts as a udp probe by the quoted source, so port_scan fires with scan type udp. 10 IPv6 probes from another address answered the same way stay below the threshold.",
+  "alerts": [
+    {"sid": 1000401, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"detector": "port_scan", "tracked_addr": "203.0.113.50", "distinct_ports": "20", "scan_types": "udp:20", "target_hosts": "192.0.2.10"}},
+    {"sid": 1000401, "kind": "summary", "src_ip": "203.0.113.50", "count": [39, 39]}
+  ],
+  "absent_sids": [1000402, 1000403]
+}

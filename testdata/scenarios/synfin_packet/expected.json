@@ -1,0 +1,8 @@
+{
+  "description": "203.0.113.60 sends two SYN+FIN packets to 192.0.2.10:80 next to a normal client connection. The SYN+FIN rule fires on the first and summarizes both; one port is not a scan.",
+  "alerts": [
+    {"sid": 1000406, "kind": "alert", "src_ip": "203.0.113.60", "dst_ip": "192.0.2.10", "dst_port": 80, "count": [1, 1]},
+    {"sid": 1000406, "kind": "summary", "src_ip": "203.0.113.60", "count": [2, 2]}
+  ],
+  "absent_sids": [1000401, 1000402, 1000404, 1000405]
+}

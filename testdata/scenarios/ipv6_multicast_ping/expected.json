@@ -1,0 +1,8 @@
+{
+  "description": "ping -6 ff02::1 three times (hop limit 1, Ethernet 33:33:00:00:00:01); four hosts answer each. Only the low-severity multicast ping rule fires: IPv6 has no broadcast, so the smurf rules stay quiet, and the hop limit of 1 does not trip the low-TTL rule because fe80::/10 is in HOME_NET.",
+  "alerts": [
+    {"sid": 1000407, "kind": "alert", "src_ip": "fe80::1", "dst_ip": "ff02::1", "count": [1, 1]},
+    {"sid": 1000407, "kind": "summary", "src_ip": "fe80::1", "count": [3, 3]}
+  ],
+  "absent_sids": [1000005, 1000006, 1000409, 1000403]
+}

@@ -1,0 +1,7 @@
+{
+  "description": "10.1.1.50 belongs to 02:00:00:00:00:32 for 50 minutes; at one hour DHCP gives it to 02:00:00:00:00:33, which probes, announces and resolves the gateway. Exactly one low mac_change (the binding moved once, stable for 1h); no flip_flop, no unsolicited_reply.",
+  "alerts": [
+    {"sid": 1000802, "kind": "alert", "src_ip": "10.1.1.50", "count": [1, 1], "details": {"old_mac": "02:00:00:00:00:32", "new_mac": "02:00:00:00:00:33", "old_stable": "1h0m0s"}}
+  ],
+  "absent_sids": [1000801, 1000803, 1000804, 1000805, 1000806, 1000807]
+}

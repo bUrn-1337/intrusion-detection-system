@@ -29,9 +29,18 @@ type deduper struct {
 	stat   *tableStat
 }
 
+// dedupKey is (sid, tracked address), plus the port for detectors that
+// alert per port (host_sweep), the MAC for arp_spoof kinds that alert
+// per MAC (unsolicited_reply, multi_ip), and a second address for
+// detectors that alert per address pair (icmp_tunnel).
 type dedupKey struct {
-	sid  int
-	addr netip.Addr
+	sid     int
+	addr    netip.Addr
+	peer    netip.Addr
+	port    uint16
+	hasPort bool
+	mac     mac6
+	hasMAC  bool
 }
 
 type dedupEntry struct {

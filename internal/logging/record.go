@@ -48,17 +48,19 @@ type CaptureStats struct {
 
 // EngineStats is rules.EngineStats with JSON names.
 type EngineStats struct {
-	Packets     uint64                `json:"packets"`
-	Alerts      uint64                `json:"alerts"`
-	Summaries   uint64                `json:"summaries"`
-	Suppressed  uint64                `json:"suppressed"`
-	Passed      uint64                `json:"passed"`
-	Whitelisted uint64                `json:"whitelisted"`
-	Evictions   uint64                `json:"evictions"`
-	Rules       int                   `json:"rules"`
-	Reloads     uint64                `json:"reloads"`
-	ReloadFails uint64                `json:"reload_fails"`
-	Tables      map[string]TableStats `json:"tables"`
+	Packets     uint64 `json:"packets"`
+	Alerts      uint64 `json:"alerts"`
+	Summaries   uint64 `json:"summaries"`
+	Suppressed  uint64 `json:"suppressed"`
+	Passed      uint64 `json:"passed"`
+	Whitelisted uint64 `json:"whitelisted"`
+	Evictions   uint64 `json:"evictions"`
+	Rules       int    `json:"rules"`
+	Reloads     uint64 `json:"reloads"`
+	ReloadFails uint64 `json:"reload_fails"`
+	// FragmentsOverLimit counts datagrams with too many fragments to track.
+	FragmentsOverLimit uint64                `json:"fragments_over_limit"`
+	Tables             map[string]TableStats `json:"tables"`
 }
 
 // TableStats is rules.TableStats with JSON names.
@@ -72,7 +74,7 @@ func EngineStatsFrom(s rules.EngineStats) EngineStats {
 	out := EngineStats{
 		Packets: s.Packets, Alerts: s.Alerts, Summaries: s.Summaries, Suppressed: s.Suppressed,
 		Passed: s.Passed, Whitelisted: s.Whitelisted, Evictions: s.Evictions, Rules: s.Rules,
-		Reloads: s.Reloads, ReloadFails: s.ReloadFails, Tables: make(map[string]TableStats, len(s.Tables)),
+		Reloads: s.Reloads, ReloadFails: s.ReloadFails, FragmentsOverLimit: s.FragmentsOverLimit, Tables: make(map[string]TableStats, len(s.Tables)),
 	}
 	for k, v := range s.Tables {
 		out.Tables[k] = TableStats{Keys: v.Keys, Evictions: v.Evictions}

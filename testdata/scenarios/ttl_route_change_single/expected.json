@@ -1,0 +1,5 @@
+{
+  "description": "30 packets from 198.51.100.40 at TTL 50, a single packet at TTL 45 (a transient 5-hop detour), then 30 more at TTL 50. One anomalous packet is far below the count of 5; nothing fires.",
+  "alerts": [],
+  "absent_sids": [1000601]
+}

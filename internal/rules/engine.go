@@ -2,6 +2,7 @@ package rules
 
 import (
 	"net/netip"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -56,12 +57,17 @@ type EngineConfig struct {
 	// HandshakeTimeout is how long a handshake may stay pending before it
 	// counts as incomplete. Default 3s.
 	HandshakeTimeout time.Duration
+	// FragmentTimeout is how long a fragmented datagram is tracked after
+	// its first fragment; one still incomplete then counts toward
+	// frag_attack kind:flood. Default 30s.
+	FragmentTimeout time.Duration
 }
 
 const (
 	DefaultDedupWindow      = 60 * time.Second
 	DefaultMaxKeys          = 50000
 	DefaultHandshakeTimeout = 3 * time.Second
+	DefaultFragmentTimeout  = 30 * time.Second
 )
 
 // Table names in EngineStats.Tables.
@@ -70,6 +76,22 @@ const (
 	TableHandshake       = "handshake"
 	TableDetectionFilter = "detection_filter"
 	TableSYNFlood        = "syn_flood"
+	TablePortScan        = "port_scan"
+	TableHostSweep       = "host_sweep"
+	TablePingSweep       = "ping_sweep"
+	TableTTLAnomaly      = "ttl_anomaly"
+	TableFragments       = "fragments"
+	TableFragFlood       = "frag_flood"
+	TableTTLFlows        = "ttl_flows"
+	TableARPBindings     = "arp_bindings"
+	TableARPRequests     = "arp_requests"
+	TableARPSpoof        = "arp_spoof"
+	TableUDPFlood        = "udp_flood"
+	TableUDPFlows        = "udp_flows"
+	TableICMPFlood       = "icmp_flood"
+	TableICMPPeers       = "icmp_peers"
+	TableEchoRequests    = "echo_requests"
+	TableICMPTunnel      = "icmp_tunnel"
 )
 
 // EngineStats is a snapshot of engine counters.
@@ -84,7 +106,10 @@ type EngineStats struct {
 	Rules       int    // rules in the active rule set
 	Reloads     uint64 // successful Reload calls
 	ReloadFails uint64 // failed Reload calls
-	Tables      map[string]TableStats
+	// FragmentsOverLimit counts datagrams that had more fragments than
+	// the tracker stores per datagram; they are no longer checked.
+	FragmentsOverLimit uint64
+	Tables             map[string]TableStats
 }
 
 // TableStats describes one kind of table. For per-rule tables the numbers
@@ -117,10 +142,17 @@ type Engine struct {
 	active    *RuleSet // the set Process is using
 	ruleState []*ruleState
 
-	now   time.Time
-	dedup *deduper
-	hs    *handshakeTracker
-	hsBuf []hsEvent
+	now           time.Time
+	dedup         *deduper
+	hs            *handshakeTracker
+	hsBuf         []hsEvent
+	frags         *fragmentTracker
+	fragBuf       []fragEvent
+	fragOverLimit atomic.Uint64
+	flows         *flowSet // completed TCP flows, for ttl_anomaly
+	arpTable      *arpTable
+	arpReqs       *arpRequests
+	echoReqs      *recentSet[echoKey] // outstanding echo requests, for icmp_flood kind:unsolicited_reply
 
 	packets, alerts, summaries, suppressed, passed, whitelisted atomic.Uint64
 	reloads, reloadFails                                        atomic.Uint64
@@ -133,10 +165,31 @@ const (
 	tHandshake
 	tFilter
 	tSYN
+	tPortScan
+	tHostSweep
+	tPingSweep
+	tTTL
+	tFrags
+	tFragFlood
+	tTTLFlows
+	tARPBindings
+	tARPRequests
+	tARPSpoof
+	tUDPFlood
+	tUDPFlows
+	tICMPFlood
+	tICMPPeers
+	tEchoRequests
+	tICMPTunnel
 	numTables
 )
 
-var tableNames = [numTables]string{TableDedup, TableHandshake, TableDetectionFilter, TableSYNFlood}
+var tableNames = [numTables]string{TableDedup, TableHandshake, TableDetectionFilter, TableSYNFlood, TablePortScan, TableHostSweep, TablePingSweep,
+	TableTTLAnomaly, TableFragments, TableFragFlood, TableTTLFlows, TableARPBindings, TableARPRequests, TableARPSpoof,
+	TableUDPFlood, TableUDPFlows, TableICMPFlood, TableICMPPeers, TableEchoRequests, TableICMPTunnel}
+
+// scanTables maps a scan detector to its table.
+var scanTables = map[string]int{DetectPortScan: tPortScan, DetectHostSweep: tHostSweep, DetectPingSweep: tPingSweep}
 
 // ruleState is the state of one stateful rule. It survives a reload when
 // the rule's text is unchanged.
@@ -144,6 +197,13 @@ type ruleState struct {
 	text   string
 	filter *windowCounter[netip.Addr]
 	syn    *synFlood
+	scan   *scanDetector
+	ttl    *ttlAnomaly
+	flood  *windowCounter[netip.Addr] // frag_attack kind:flood, keyed by source
+	arp    *arpSpoof
+	udp    *udpFlood
+	icmp   *icmpFlood
+	tunnel *icmpTunnel
 }
 
 // NewEngine returns an engine using rs.
@@ -157,12 +217,20 @@ func NewEngine(rs *RuleSet, cfg EngineConfig) *Engine {
 	if cfg.HandshakeTimeout <= 0 {
 		cfg.HandshakeTimeout = DefaultHandshakeTimeout
 	}
+	if cfg.FragmentTimeout <= 0 {
+		cfg.FragmentTimeout = DefaultFragmentTimeout
+	}
 	if rs == nil {
-		rs = newRuleSet("", nil)
+		rs = newRuleSet("", nil, nil)
 	}
 	e := &Engine{cfg: cfg}
 	e.dedup = newDeduper(cfg.DedupWindow, cfg.MaxKeys, &e.tables[tDedup])
 	e.hs = newHandshakeTracker(cfg.HandshakeTimeout, cfg.MaxKeys, &e.tables[tHandshake])
+	e.frags = newFragmentTracker(cfg.FragmentTimeout, cfg.MaxKeys, &e.tables[tFrags])
+	e.flows = newFlowSet(cfg.MaxKeys, &e.tables[tTTLFlows])
+	e.arpTable = newARPTable(cfg.MaxKeys, &e.tables[tARPBindings])
+	e.arpReqs = newARPRequests(cfg.MaxKeys, &e.tables[tARPRequests])
+	e.echoReqs = newRecentSet[echoKey](echoRequestIdle, cfg.MaxKeys, &e.tables[tEchoRequests])
 	e.next.Store(rs)
 	e.nRules.Store(int64(rs.Len()))
 	e.activate(rs)
@@ -208,14 +276,49 @@ func (e *Engine) activate(rs *RuleSet) {
 			if st.syn != nil {
 				st.syn.rule = r
 			}
+			if st.scan != nil {
+				st.scan.rule = r
+			}
+			if st.ttl != nil {
+				st.ttl.rule = r
+			}
+			if st.arp != nil {
+				st.arp.rule = r
+			}
+			if st.udp != nil {
+				st.udp.rule = r
+			}
+			if st.icmp != nil {
+				st.icmp.rule = r
+			}
+			if st.tunnel != nil {
+				st.tunnel.rule = r
+			}
 			continue
 		}
 		st := &ruleState{text: r.text}
 		if r.filter != nil {
 			st.filter = newWindowCounter[netip.Addr](r.filter.count, r.filter.span(), e.cfg.MaxKeys, &e.tables[tFilter])
 		}
-		if r.Detect == DetectSYNFlood {
+		switch r.Detect {
+		case DetectSYNFlood:
 			st.syn = newSYNFlood(r, e.cfg.MaxKeys, &e.tables[tSYN])
+		case DetectPortScan, DetectHostSweep, DetectPingSweep:
+			st.scan = newScanDetector(r, e.cfg.MaxKeys, &e.tables[scanTables[r.Detect]])
+		case DetectTTLAnomaly:
+			st.ttl = newTTLAnomaly(r, e.cfg.MaxKeys, &e.tables[tTTL])
+		case DetectFragAttack:
+			if r.fragKind == FragFlood {
+				st.flood = newWindowCounter[netip.Addr](r.detect.count, r.detect.span(), e.cfg.MaxKeys, &e.tables[tFragFlood])
+			}
+		case DetectARPSpoof:
+			st.arp = newARPSpoof(r, e.cfg.MaxKeys, &e.tables[tARPSpoof])
+		case DetectUDPFlood:
+			st.udp = newUDPFlood(r, e.cfg.MaxKeys, &e.tables[tUDPFlood], &e.tables[tUDPFlows])
+		case DetectICMPFlood:
+			st.icmp = newICMPFlood(r, e.cfg.MaxKeys, &e.tables[tICMPFlood], &e.tables[tICMPPeers])
+		case DetectICMPTunnel:
+			st.tunnel = newICMPTunnel(r, e.cfg.MaxKeys, &e.tables[tICMPTunnel])
 		}
 		states[i] = st
 	}
@@ -226,9 +329,43 @@ func (e *Engine) activate(rs *RuleSet) {
 		if st.syn != nil {
 			st.syn.clear()
 		}
+		if st.scan != nil {
+			st.scan.clear()
+		}
+		if st.ttl != nil {
+			st.ttl.clear()
+		}
+		if st.flood != nil {
+			st.flood.clear()
+		}
+		if st.arp != nil {
+			st.arp.clear()
+		}
+		if st.udp != nil {
+			st.udp.clear()
+		}
+		if st.icmp != nil {
+			st.icmp.clear()
+		}
+		if st.tunnel != nil {
+			st.tunnel.clear()
+		}
 	}
-	if len(rs.synFlood) == 0 {
+	if !rs.handshakes {
 		e.hs.clear()
+	}
+	if len(rs.frags) == 0 {
+		e.frags.clear()
+	}
+	if len(rs.ttl) == 0 {
+		e.flows.clear()
+	}
+	if len(rs.arp) == 0 {
+		e.arpTable.clear()
+		e.arpReqs.clear()
+	}
+	if !rs.echoReqs {
+		e.echoReqs.clear()
 	}
 	e.active, e.ruleState = rs, states
 }
@@ -252,13 +389,30 @@ func (e *Engine) Process(p *packet.ParsedPacket) []Alert {
 	var v view
 	v.init(p)
 
-	if len(rs.synFlood) > 0 {
+	if rs.handshakes {
 		e.hsBuf = e.hs.expire(now, e.hsBuf[:0])
 		if v.g == gTCP {
 			seg := tcpSegment{src: v.src, dst: v.dst, sport: v.sport, dport: v.dport, flags: v.flags, seq: p.TCPSeq, ack: p.TCPAck}
 			e.hsBuf = e.hs.observe(&seg, now, e.hsBuf)
 		}
 		out = e.handshakeEvents(rs, e.hsBuf, out)
+	}
+	if rs.probes {
+		if pr, ok := packetProbe(p, &v, now); ok {
+			out = e.probe(rs, &pr, out)
+		}
+	}
+	if len(rs.frags) > 0 {
+		out = e.fragments(rs, p, &v, out)
+	}
+	if len(rs.arp) > 0 && v.g == gARP {
+		out = e.arp(rs, p, &v, out)
+	}
+	if len(rs.udp) > 0 && v.g == gUDP {
+		out = e.udpFloods(rs, p, &v, out)
+	}
+	if len(rs.icmp) > 0 && v.g == gICMP {
+		out = e.icmp(rs, p, &v, out)
 	}
 
 	switch {
@@ -268,6 +422,12 @@ func (e *Engine) Process(p *packet.ParsedPacket) []Alert {
 	case e.passes(rs, &v):
 		e.passed.Add(1)
 	default:
+		if len(rs.ttl) > 0 {
+			mode, hk := e.ttlMode(&v)
+			for _, r := range rs.ttl {
+				out = e.ttlAnomaly(r, p, &v, mode, hk, out)
+			}
+		}
 		for _, r := range rs.groups[v.g].alert {
 			if r.match(&v) {
 				out = e.matched(r, &v, out)
@@ -286,7 +446,7 @@ func (e *Engine) Flush() []Alert {
 		e.activate(rs)
 	}
 	var out []Alert
-	if len(e.active.synFlood) > 0 {
+	if e.active.handshakes {
 		e.hsBuf = e.hs.expireAll(e.hsBuf[:0])
 		for _, ev := range e.hsBuf {
 			if ev.t.After(e.now) {
@@ -294,6 +454,15 @@ func (e *Engine) Flush() []Alert {
 			}
 		}
 		out = e.handshakeEvents(e.active, e.hsBuf, out)
+	}
+	if len(e.active.frags) > 0 {
+		e.fragBuf = e.frags.expireAll(e.fragBuf[:0])
+		for _, ev := range e.fragBuf {
+			if ev.t.After(e.now) {
+				e.now = ev.t
+			}
+		}
+		out = e.fragExpired(e.active, e.fragBuf, out)
 	}
 	out = e.dedup.flush(e.now, out)
 	e.count(out)
@@ -328,29 +497,291 @@ func (e *Engine) passes(rs *RuleSet, v *view) bool {
 	return false
 }
 
-// handshakeEvents feeds handshake outcomes to the SYN flood detectors.
-// Each outcome is filtered as if it were the handshake's opening SYN
-// (client -> server, flags S, no payload): a whitelisted client or a
-// matching pass rule suppresses it, and a detector rule only counts
-// handshakes that its addresses and ports match.
+// handshakeEvents feeds handshake outcomes to the SYN flood detectors,
+// and incomplete ones as probes to port_scan and host_sweep. Each outcome
+// is filtered as if it were the handshake's opening SYN (client -> server,
+// flags S, no payload): a whitelisted client or a matching pass rule
+// suppresses it, and a detector rule only counts handshakes that its
+// addresses and ports match.
 func (e *Engine) handshakeEvents(rs *RuleSet, evs []hsEvent, out []Alert) []Alert {
-	for _, ev := range evs {
+	for i := range evs {
+		ev := &evs[i]
+		if len(rs.ttl) > 0 {
+			out = e.ttlHandshake(rs, ev, out)
+		}
 		if e.isWhitelisted(ev.key.client) {
 			continue
 		}
 		syn := view{g: gTCP, src: ev.key.client, dst: ev.key.server, sport: ev.key.cport, dport: ev.key.sport, flags: tcpSYN, havePayload: true, haveLower: true}
+		if ev.synFin {
+			syn.flags |= tcpFIN
+		}
 		if e.passes(rs, &syn) {
 			continue
 		}
-		for _, r := range rs.synFlood {
+		pr, isProbe := handshakeProbe(*ev, &syn)
+		for _, r := range rs.detectors {
 			if !r.matchAddrs(&syn) {
 				continue
 			}
-			key, details, fired := e.ruleState[r.idx].syn.observe(ev)
+			st := e.ruleState[r.idx]
+			switch {
+			case st.syn != nil:
+				key, details, fired := st.syn.observe(*ev)
+				if fired {
+					out = e.emit(r, dedupKey{sid: r.SID, addr: key}, &syn, details, out)
+				}
+			case st.scan != nil && isProbe && st.scan.accepts(&pr):
+				dk, details, fired := st.scan.observe(&pr)
+				if fired {
+					out = e.emit(r, dk, &pr.v, details, out)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// probe feeds a per-packet probe to the scan detectors, filtered like a
+// packet from the prober to the target.
+func (e *Engine) probe(rs *RuleSet, pr *probe, out []Alert) []Alert {
+	if e.isWhitelisted(pr.v.src) || e.passes(rs, &pr.v) {
+		return out
+	}
+	for _, r := range rs.detectors {
+		st := e.ruleState[r.idx]
+		if st.scan == nil || !st.scan.accepts(pr) || !r.matchAddrs(&pr.v) {
+			continue
+		}
+		if dk, details, fired := st.scan.observe(pr); fired {
+			out = e.emit(r, dk, &pr.v, details, out)
+		}
+	}
+	return out
+}
+
+// ttlMode classifies a packet for ttl_anomaly (see ttl.go): TCP packets
+// of a handshake pending in the tracker are held under its key, and TCP
+// packets of a completed flow are samples only.
+func (e *Engine) ttlMode(v *view) (ttlMode, hsKey) {
+	if v.g != gTCP {
+		return ttlNow, hsKey{}
+	}
+	fromClient := hsKey{client: v.src, cport: v.sport, server: v.dst, sport: v.dport}
+	fromServer := hsKey{client: v.dst, cport: v.dport, server: v.src, sport: v.sport}
+	for _, k := range []hsKey{fromClient, fromServer} {
+		if e.hs.pending(k) {
+			return ttlHold, k
+		}
+	}
+	for _, k := range []hsKey{fromClient, fromServer} {
+		if e.flows.touch(k, e.now) {
+			return ttlOnlySample, k
+		}
+	}
+	return ttlNow, hsKey{}
+}
+
+// ttlAnomaly feeds a packet that is not whitelisted or passed to one
+// ttl_anomaly rule.
+func (e *Engine) ttlAnomaly(r *Rule, p *packet.ParsedPacket, v *view, mode ttlMode, hk hsKey, out []Alert) []Alert {
+	if v.g == gARP || !slices.Contains(groupsFor(r.Proto), v.g) || !r.matchAddrs(v) {
+		return out
+	}
+	d := e.ruleState[r.idx].ttl
+	tag, anomalous := d.sample(v.src, p.IPTTL, e.now, mode)
+	switch {
+	case !anomalous:
+	case mode == ttlHold:
+		d.hold(hk, ttlHeld{src: v.src, dst: v.dst, sport: v.sport, dport: v.dport, tag: tag})
+	default:
+		if dk, details, fired := d.count(v.src, tag, e.now); fired {
+			out = e.emit(r, dk, v, details, out)
+		}
+	}
+	return out
+}
+
+// ttlHandshake applies a handshake outcome to ttl_anomaly: a completed
+// flow is remembered, and anomalies held for the handshake are dropped
+// if it completed or counted at the outcome time if not. Held anomalies
+// already passed the whitelist, pass rules and the rule's addresses.
+func (e *Engine) ttlHandshake(rs *RuleSet, ev *hsEvent, out []Alert) []Alert {
+	if ev.complete {
+		e.flows.add(ev.key, ev.t)
+	}
+	for _, r := range rs.ttl {
+		d := e.ruleState[r.idx].ttl
+		for _, h := range d.resolve(ev) {
+			if dk, details, fired := d.count(h.src, h.tag, ev.t); fired {
+				hv := view{g: gTCP, src: h.src, dst: h.dst, sport: h.sport, dport: h.dport}
+				out = e.emit(r, dk, &hv, details, out)
+			}
+		}
+	}
+	return out
+}
+
+// fragments runs the fragment tracker and the frag_attack rules for one
+// packet. The tracker sees every usable fragment, whitelisted or not, so
+// its state does not depend on the rules; alerts about the packet are
+// filtered like the packet itself (whitelist, pass rules, the rule's
+// addresses).
+func (e *Engine) fragments(rs *RuleSet, p *packet.ParsedPacket, v *view, out []Alert) []Alert {
+	e.fragBuf = e.frags.expire(e.now, e.fragBuf[:0])
+	out = e.fragExpired(rs, e.fragBuf, out)
+	if !fragmentUsable(p) {
+		return out
+	}
+	e.fragBuf = e.frags.observe(p, v, e.now, e.fragBuf[:0])
+	e.fragOverLimit.Store(e.frags.overLimit)
+	if e.isWhitelisted(v.src) || e.passes(rs, v) {
+		return out
+	}
+	for _, r := range rs.frags {
+		if !r.matchAddrs(v) {
+			continue
+		}
+		var details map[string]string
+		switch r.fragKind {
+		case FragTiny:
+			if reason := tinyReason(p, r); reason != "" {
+				details = fragDetails(FragTiny, p)
+				details["reason"] = reason
+				details["min_size"] = strconv.Itoa(r.minSize)
+			}
+		case FragOversize:
+			if end := oversizeEnd(p); end != 0 {
+				details = fragDetails(FragOversize, p)
+				details["end"] = strconv.FormatUint(uint64(end), 10)
+				details["limit"] = strconv.Itoa(maxIPPacket)
+			}
+		case FragOverlap:
+			for _, ev := range e.fragBuf {
+				if ev.overlap {
+					details = fragDetails(FragOverlap, p)
+					details["fragment"] = ev.frag.String()
+					details["overlaps"] = ev.with.String()
+					details["fragments_seen"] = strconv.Itoa(ev.nFrags)
+					break
+				}
+			}
+		}
+		if details != nil {
+			out = e.emit(r, dedupKey{sid: r.SID, addr: v.src}, v, func() map[string]string { return details }, out)
+		}
+	}
+	return out
+}
+
+// fragExpired feeds datagrams that expired incomplete to the kind:flood
+// rules, each filtered as a packet from its source to its destination.
+func (e *Engine) fragExpired(rs *RuleSet, evs []fragEvent, out []Alert) []Alert {
+	for _, ev := range evs {
+		if ev.overlap || e.isWhitelisted(ev.key.src) {
+			continue
+		}
+		dv := view{g: gIP, src: ev.key.src, dst: ev.key.dst, havePayload: true, haveLower: true}
+		if e.passes(rs, &dv) {
+			continue
+		}
+		for _, r := range rs.frags {
+			if r.fragKind != FragFlood || !r.matchAddrs(&dv) {
+				continue
+			}
+			ent, fired := e.ruleState[r.idx].flood.add(ev.key.src, ev.t, 0)
 			if !fired {
 				continue
 			}
-			out = e.emit(r, key, &syn, details, out)
+			details := func() map[string]string {
+				return map[string]string{
+					"detector":             DetectFragAttack,
+					"kind":                 FragFlood,
+					"track":                TrackBySrc.String(),
+					"tracked_addr":         ev.key.src.String(),
+					"incomplete_datagrams": strconv.Itoa(ent.size()),
+					"seconds":              strconv.Itoa(r.detect.seconds),
+					"window":               ent.newest().Sub(ent.oldest()).Round(time.Millisecond).String(),
+					"timeout":              e.cfg.FragmentTimeout.String(),
+				}
+			}
+			out = e.emit(r, dedupKey{sid: r.SID, addr: ev.key.src}, &dv, details, out)
+		}
+	}
+	return out
+}
+
+// udpFloods runs the udp_flood rules for one UDP packet. Every packet is
+// checked as a reply, whitelisted or passed or not; only packets that are
+// neither, and that match a rule's addresses, count toward its volume.
+func (e *Engine) udpFloods(rs *RuleSet, p *packet.ParsedPacket, v *view, out []Alert) []Alert {
+	for _, r := range rs.udp {
+		e.ruleState[r.idx].udp.reply(v, e.now)
+	}
+	if e.isWhitelisted(v.src) || e.passes(rs, v) {
+		return out
+	}
+	for _, r := range rs.udp {
+		if !r.matchAddrs(v) {
+			continue
+		}
+		if key, details, fired := e.ruleState[r.idx].udp.forward(p, v, e.now); fired {
+			out = e.emit(r, dedupKey{sid: r.SID, addr: key}, v, details, out)
+		}
+	}
+	return out
+}
+
+// icmp runs the icmp_flood and icmp_tunnel rules for one ICMP packet.
+// Echo requests are recorded for kind:unsolicited_reply whether or not
+// the packet is whitelisted or passed, so that the replies they solicit
+// are known; the rules only count packets that are neither.
+func (e *Engine) icmp(rs *RuleSet, p *packet.ParsedPacket, v *view, out []Alert) []Alert {
+	v6 := p.IPVersion == 6
+	request, reply := isEchoRequest(p.ICMPType, v6), isEchoReply(p.ICMPType, v6)
+	unsolicited := false
+	if rs.echoReqs && p.HasICMPEcho {
+		switch {
+		case request:
+			e.echoReqs.add(echoKeyOf(p, v), e.now)
+		case reply:
+			unsolicited = !solicited(e.echoReqs, p, v, e.now)
+		}
+	}
+	if e.isWhitelisted(v.src) || e.passes(rs, v) {
+		return out
+	}
+	errMsg := isICMPError(p.ICMPType, v6)
+	for _, r := range rs.icmp {
+		if !r.matchAddrs(v) {
+			continue
+		}
+		st := e.ruleState[r.idx]
+		if st.tunnel != nil {
+			if (request || reply) && p.HasICMPEcho {
+				pair, details, fired := st.tunnel.observe(v.getPayload(), v.src, v.dst, request, e.now)
+				if fired {
+					out = e.emit(r, dedupKey{sid: r.SID, addr: pair.src, peer: pair.dst}, v, details, out)
+				}
+			}
+			continue
+		}
+		switch r.icmpKind {
+		case ICMPEcho:
+			if !request {
+				continue
+			}
+		case ICMPUnsolicitedReply:
+			if !unsolicited {
+				continue
+			}
+		case ICMPErrorFlood:
+			if !errMsg {
+				continue
+			}
+		}
+		if key, details, fired := st.icmp.observe(p, v, e.now); fired {
+			out = e.emit(r, dedupKey{sid: r.SID, addr: key}, v, details, out)
 		}
 	}
 	return out
@@ -377,12 +808,12 @@ func (e *Engine) matched(r *Rule, v *view, out []Alert) []Alert {
 			}
 		}
 	}
-	return e.emit(r, key, v, details, out)
+	return e.emit(r, dedupKey{sid: r.SID, addr: key}, v, details, out)
 }
 
 // emit passes a firing rule through dedup.
-func (e *Engine) emit(r *Rule, key netip.Addr, v *view, details func() map[string]string, out []Alert) []Alert {
-	out, isNew := e.dedup.seen(dedupKey{sid: r.SID, addr: key}, e.now, func() Alert {
+func (e *Engine) emit(r *Rule, key dedupKey, v *view, details func() map[string]string, out []Alert) []Alert {
+	out, isNew := e.dedup.seen(key, e.now, func() Alert {
 		a := Alert{
 			Time: e.now, FirstSeen: e.now, LastSeen: e.now,
 			SID: r.SID, Rev: r.Rev, Msg: r.Msg, Severity: r.Severity, Category: r.Category,
@@ -411,16 +842,17 @@ func addrString(a netip.Addr) string {
 // goroutine.
 func (e *Engine) Stats() EngineStats {
 	s := EngineStats{
-		Packets:     e.packets.Load(),
-		Alerts:      e.alerts.Load(),
-		Summaries:   e.summaries.Load(),
-		Suppressed:  e.suppressed.Load(),
-		Passed:      e.passed.Load(),
-		Whitelisted: e.whitelisted.Load(),
-		Rules:       int(e.nRules.Load()),
-		Reloads:     e.reloads.Load(),
-		ReloadFails: e.reloadFails.Load(),
-		Tables:      make(map[string]TableStats, numTables),
+		Packets:            e.packets.Load(),
+		Alerts:             e.alerts.Load(),
+		Summaries:          e.summaries.Load(),
+		Suppressed:         e.suppressed.Load(),
+		Passed:             e.passed.Load(),
+		Whitelisted:        e.whitelisted.Load(),
+		Rules:              int(e.nRules.Load()),
+		Reloads:            e.reloads.Load(),
+		ReloadFails:        e.reloadFails.Load(),
+		FragmentsOverLimit: e.fragOverLimit.Load(),
+		Tables:             make(map[string]TableStats, numTables),
 	}
 	for i := range e.tables {
 		ts := TableStats{Keys: e.tables[i].keys.Load(), Evictions: e.tables[i].evictions.Load()}

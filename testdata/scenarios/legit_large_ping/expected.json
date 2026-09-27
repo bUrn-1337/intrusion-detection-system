@@ -1,0 +1,5 @@
+{
+  "description": "ping -c 3 -s 8000 over IPv4 and IPv6 at MTU 1500: each 8008-byte request and reply is sent in six regular fragments. Nothing fires.",
+  "alerts": [],
+  "absent_sids": [1000701, 1000702, 1000703, 1000704]
+}

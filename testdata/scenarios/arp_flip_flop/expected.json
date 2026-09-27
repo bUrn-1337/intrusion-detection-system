@@ -1,0 +1,12 @@
+{
+  "description": "arpspoof-style poisoning: the attacker tells 10.1.1.10 every 2s that the gateway 10.1.1.1 is at 02:00:00:00:00:66, and the real gateway answers the victim's request every 10s. The binding flips back and forth: flip_flop fires on the third return to a known MAC (10s in), every change is a mac_change, and the attacker replies more than 5s after a request are unsolicited (5 within 30s).",
+  "alerts": [
+    {"sid": 1000803, "kind": "alert", "src_ip": "10.1.1.1", "count": [1, 1], "details": {"returns": "3", "mac": "02:00:00:00:00:01", "previous_mac": "02:00:00:00:00:66"}},
+    {"sid": 1000803, "kind": "summary", "src_ip": "10.1.1.1", "count": [8, 8]},
+    {"sid": 1000802, "kind": "alert", "src_ip": "10.1.1.1", "count": [1, 1], "details": {"old_mac": "02:00:00:00:00:01", "new_mac": "02:00:00:00:00:66"}},
+    {"sid": 1000802, "kind": "summary", "src_ip": "10.1.1.1", "count": [11, 11]},
+    {"sid": 1000804, "kind": "alert", "src_ip": "10.1.1.1", "count": [1, 1], "details": {"mac": "02:00:00:00:00:66", "replies": "5"}},
+    {"sid": 1000804, "kind": "summary", "src_ip": "10.1.1.1", "count": [8, 8]}
+  ],
+  "absent_sids": [1000801, 1000805, 1000806, 1000807]
+}

@@ -1,0 +1,8 @@
+{
+  "description": "Two UDP datagrams from 192.0.2.10 to itself (different ports): only the IP-level same-address rule fires. Loopback traffic (127.0.0.1 and ::1 to themselves in all-zero-MAC frames, as captured on lo) is excluded from both land rules by eth_dst:!zero and stays quiet.",
+  "alerts": [
+    {"sid": 1000004, "kind": "alert", "src_ip": "192.0.2.10", "dst_ip": "192.0.2.10", "dst_port": 7, "count": [1, 1]},
+    {"sid": 1000004, "kind": "summary", "src_ip": "192.0.2.10", "count": [2, 2]}
+  ],
+  "absent_sids": [1000003]
+}

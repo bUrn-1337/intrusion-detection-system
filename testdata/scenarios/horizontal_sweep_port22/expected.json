@@ -1,0 +1,9 @@
+{
+  "description": "203.0.113.50 SYN-probes port 22 on 192.0.2.1-40 in 1s: every tenth host has SSH open (half-open probe), every third is filtered (no answer, the handshake times out), the rest refuse. host_sweep fires once for port 22; one port on many hosts is not a port scan.",
+  "alerts": [
+    {"sid": 1000402, "kind": "alert", "src_ip": "203.0.113.50", "dst_port": 22, "count": [1, 1],
+     "details": {"detector": "host_sweep", "tracked_addr": "203.0.113.50", "dst_port": "22", "proto": "tcp", "distinct_hosts": "15", "scan_types": "syn:15"}},
+    {"sid": 1000402, "kind": "summary", "src_ip": "203.0.113.50", "count": [26, 26]}
+  ],
+  "absent_sids": [1000001, 1000002, 1000401]
+}

@@ -110,9 +110,29 @@ func TestParseOptions(t *testing.T) {
 				t.Errorf("%+v", r)
 			}
 		}},
+		{"detect syn_flood max_distinct_ports", hdr + `(msg:"m"; sid:1; detect:syn_flood; track:by_dst; count:100; seconds:5; max_distinct_ports:30;)`, func(t *testing.T, r *Rule) {
+			if r.maxPorts != 30 || r.minRatio != 0.8 {
+				t.Errorf("maxPorts %d minRatio %v", r.maxPorts, r.minRatio)
+			}
+		}},
+		{"detect port_scan", `alert ip any any -> any any (msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10;)`, func(t *testing.T, r *Rule) {
+			if r.Detect != DetectPortScan || r.distinct != 20 || r.detect.seconds != 10 || r.Proto != ProtoIP || r.maxPorts != 0 {
+				t.Errorf("got %+v", r)
+			}
+		}},
+		{"detect host_sweep on udp", `alert udp any any -> any 161 (msg:"m"; sid:1; detect:host_sweep; distinct_hosts:15; seconds:30;)`, func(t *testing.T, r *Rule) {
+			if r.Detect != DetectHostSweep || r.distinct != 15 || r.detect.seconds != 30 {
+				t.Errorf("got %+v", r)
+			}
+		}},
+		{"detect ping_sweep", `alert icmp any any -> any any (msg:"m"; sid:1; detect:ping_sweep; distinct_hosts:15; seconds:30;)`, func(t *testing.T, r *Rule) {
+			if r.Detect != DetectPingSweep || r.distinct != 15 || r.detect.seconds != 30 {
+				t.Errorf("got %+v", r)
+			}
+		}},
 		{"detect default ratio", hdr + `(msg:"m"; sid:1; detect:syn_flood; track:by_src; count:1; seconds:1;)`, func(t *testing.T, r *Rule) {
-			if r.minRatio != 0.8 {
-				t.Error(r.minRatio)
+			if r.minRatio != 0.8 || r.maxPorts != 5 {
+				t.Error(r.minRatio, r.maxPorts)
 			}
 		}},
 		{"whitespace and tabs", "  alert\ttcp  any any\t-> any any   ( msg : \"m\" ;  sid : 5 ; )  ", func(t *testing.T, r *Rule) {
@@ -248,7 +268,27 @@ func TestParseErrors(t *testing.T) {
 		{"detection_filter count", hdr + `(msg:"m"; sid:1; detection_filter:track by_src, count 0, seconds 1;)`, "count"},
 		{"detection_filter term", hdr + `(msg:"m"; sid:1; detection_filter:track by_src, count 5, secs 1;)`, `unknown term "secs"`},
 		{"detection_filter too big", hdr + `(msg:"m"; sid:1; detection_filter:track by_src, count 100001, seconds 1;)`, "1 to 100000"},
-		{"detect unknown", hdr + `(msg:"m"; sid:1; detect:port_scan;)`, `detect "port_scan"`},
+		{"detect unknown", hdr + `(msg:"m"; sid:1; detect:port_sweep;)`, `detect "port_sweep": want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood or icmp_tunnel`},
+		{"port_scan missing params", hdr + `(msg:"m"; sid:1; detect:port_scan;)`, "detect:port_scan needs distinct_ports, seconds"},
+		{"port_scan with track", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10; track:by_dst;)`, "option track is not valid with detect:port_scan"},
+		{"port_scan with count", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10; count:5;)`, "option count is not valid with detect:port_scan"},
+		{"port_scan with distinct_hosts", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_hosts:20; seconds:10;)`, "not valid with detect:port_scan"},
+		{"port_scan with ratio", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10; min_incomplete_ratio:0.5;)`, "option min_incomplete_ratio is not valid with detect:port_scan"},
+		{"port_scan too many", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_ports:1001; seconds:10;)`, "1 to 1000"},
+		{"port_scan zero", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_ports:0; seconds:10;)`, "distinct_ports"},
+		{"port_scan on icmp", `alert icmp any any -> any any (msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10;)`, "requires protocol ip, tcp or udp"},
+		{"host_sweep with distinct_ports", hdr + `(msg:"m"; sid:1; detect:host_sweep; distinct_ports:15; seconds:30;)`, "option distinct_ports is not valid with detect:host_sweep"},
+		{"host_sweep missing seconds", hdr + `(msg:"m"; sid:1; detect:host_sweep; distinct_hosts:15;)`, "detect:host_sweep needs seconds"},
+		{"host_sweep on arp", `alert arp any any -> any any (msg:"m"; sid:1; detect:host_sweep; distinct_hosts:15; seconds:30;)`, "requires protocol ip, tcp or udp"},
+		{"ping_sweep on tcp", hdr + `(msg:"m"; sid:1; detect:ping_sweep; distinct_hosts:15; seconds:30;)`, "requires protocol ip or icmp"},
+		{"both distinct options", `alert ip any any -> any any (msg:"m"; sid:1; detect:host_sweep; distinct_hosts:15; distinct_ports:3; seconds:30;)`, "cannot both be given"},
+		{"distinct twice", `alert ip any any -> any any (msg:"m"; sid:1; detect:host_sweep; distinct_hosts:15; distinct_hosts:3; seconds:30;)`, "distinct_hosts given more than once"},
+		{"max_distinct_ports with port_scan", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10; max_distinct_ports:5;)`, "option max_distinct_ports is not valid with detect:port_scan"},
+		{"max_distinct_ports range", hdr + `(msg:"m"; sid:1; detect:syn_flood; track:by_src; count:5; seconds:1; max_distinct_ports:0;)`, "max_distinct_ports"},
+		{"max_distinct_ports without detect", hdr + `(msg:"m"; sid:1; max_distinct_ports:5;)`, "option max_distinct_ports is only valid with detect:syn_flood"},
+		{"distinct_hosts without detect", hdr + `(msg:"m"; sid:1; distinct_hosts:5;)`, "option distinct_hosts is only valid with detect:host_sweep, detect:ping_sweep"},
+		{"seconds without detect", hdr + `(msg:"m"; sid:1; seconds:5;)`, "option seconds is only valid with detect:syn_flood, detect:port_scan"},
+		{"pass with port_scan", `pass ip any any -> any any (msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10;)`, "detect cannot be used with a pass rule"},
 		{"detect missing params", hdr + `(msg:"m"; sid:1; detect:syn_flood; count:5;)`, "needs track, seconds"},
 		{"detect ratio range", hdr + `(msg:"m"; sid:1; detect:syn_flood; track:by_src; count:5; seconds:1; min_incomplete_ratio:1.5;)`, "min_incomplete_ratio"},
 		{"detect on udp", `alert udp any any -> any any (msg:"m"; sid:1; detect:syn_flood; track:by_src; count:5; seconds:1;)`, "requires protocol tcp"},
@@ -360,8 +400,8 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rules.conf: %v", err)
 	}
-	if rs.Len() != 8 || len(rs.synFlood) != 2 {
-		t.Errorf("rules.conf: %d rules, %d detectors", rs.Len(), len(rs.synFlood))
+	if rs.Len() != 43 || len(rs.detectors) != 25 {
+		t.Errorf("rules.conf: %d rules, %d detectors", rs.Len(), len(rs.detectors))
 	}
 	for _, r := range rs.Rules() {
 		if r.Msg == "" || r.Category == "" || r.Severity == "" || r.File != "../../rules.conf" || r.Line == 0 {
@@ -408,8 +448,8 @@ func TestGrouping(t *testing.T) {
 			t.Errorf("group %d alert = %v, want %v", c.g, got, c.alert)
 		}
 	}
-	if got := sids(rs.synFlood); !reflect.DeepEqual(got, []int{6}) {
-		t.Errorf("synFlood = %v", got)
+	if got := sids(rs.detectors); !reflect.DeepEqual(got, []int{6}) || !rs.handshakes || rs.probes {
+		t.Errorf("detectors = %v, handshakes %v, probes %v", got, rs.handshakes, rs.probes)
 	}
 }
 
@@ -420,8 +460,32 @@ func FuzzLoad(f *testing.F) {
 	f.Add(`alert tcp [10.0.0.0/8,!10.0.0.1] 1024: <> ![::1,2001:db8::/32] [80,!81,90:95] (msg:"a\"b"; sid:1; content:"x|0d 0a|"; nocase; flags:SA+;)`)
 	f.Add(`alert tcp any any -> any any (msg:"m"; sid:1; detection_filter:track by_src, count 5, seconds 30;)`)
 	f.Add(`alert tcp any any -> any any (msg:"m"; sid:2; detect:syn_flood; track:by_dst; count:5; seconds:1; min_incomplete_ratio:0.3)`)
+	f.Add(`alert ip any any -> any any (msg:"m"; sid:3; detect:port_scan; distinct_ports:20; seconds:10;)`)
+	f.Add(`alert icmp any any -> any any (msg:"m"; sid:4; detect:ping_sweep; distinct_hosts:15; seconds:30;)`)
 	f.Add("alert tcp any any -> any any (msg:\"m\"; sid:1;)\nalert tcp any any -> any any (msg:\"m\"; sid:1;)")
 	f.Add(`alert tcp [ any -> any any (msg:"; sid:1`)
+	f.Add("var HOME_NET [10.0.0.0/8,fc00::/7]\nvar EXTERNAL_NET !$HOME_NET\nvar P [80,443]\n" +
+		`alert tcp $EXTERNAL_NET any -> [$HOME_NET,!10.0.0.1] !$P (msg:"m"; sid:1; same_ip; same_port; flags:S+; ttl:<3;)`)
+	f.Add("var A $B\nvar B [$A,1.2.3.4]\nalert ip $A any -> any any (msg:\"m\"; sid:1;)")
+	f.Add(`alert icmp any any -> 255.255.255.255 any (msg:"m"; sid:1; itype:8; icode:0; eth_dst:broadcast; ttl:>200;)`)
+	f.Add("var HOME_NET 10.0.0.0/8\n" + `alert ip any any -> any any (msg:"m"; sid:1; detect:ttl_anomaly; count:5; seconds:60; min_samples:10; max_hop_diff:3; scope:external;)`)
+	f.Add(`alert ip any any -> any any (msg:"m"; sid:1; detect:frag_attack; kind:tiny; min_size:256;)`)
+	f.Add(`alert ip any any -> any any (msg:"m"; sid:1; detect:frag_attack; kind:flood; count:50; seconds:30;)`)
+	f.Add("arpbind 192.168.1.1 aa:bb:cc:dd:ee:01\narpbind 192.168.1.2 AA-BB-CC-DD-EE-02\n" +
+		`alert arp any any -> any any (msg:"m"; sid:1; detect:arp_spoof; kind:static_violation;)`)
+	f.Add(`alert arp any any -> any any (msg:"m"; sid:1; detect:arp_spoof; kind:flip_flop; count:3; seconds:60;)`)
+	f.Add(`alert arp any any -> any any (msg:"m"; sid:1; detect:arp_spoof; kind:multi_ip; count:10; seconds:60;)`)
+	f.Add(`pass arp 10.20.0.0/16 any -> any any (msg:"m"; sid:1; arp_op:reply; eth_dst:!broadcast;)`)
+	f.Add("arpbind 10.0.0.1 02:00:00:00:00:01\narpbind 10.0.0.1 ff:ff:ff:ff:ff:ff\narpbind ::1 x")
+	f.Add(`alert icmp any any -> any any (msg:"m"; sid:1; itype:8; dsize:>1472;)` + "\n" +
+		`alert udp any any -> any any (msg:"m"; sid:2; dsize:0<>65535;)` + "\n" +
+		`alert tcp any any -> any any (msg:"m"; sid:3; dsize:<1; flags:S;)`)
+	f.Add(`alert ip any any -> any any (msg:"m"; sid:1; dsize:9<>3;)`)
+	f.Add(`alert ip any any -> any any (msg:"m"; sid:1; dsize:5<>;)`)
+	f.Add(`alert udp any any -> any any (msg:"m"; sid:1; detect:udp_flood; track:by_dst; metric:bytes; count:100000000; seconds:5; max_reply_ratio:0.02;)`)
+	f.Add(`alert icmp any any -> any any (msg:"m"; sid:1; detect:icmp_flood; kind:echo; track:by_src; count:1000; seconds:5;)` + "\n" +
+		`alert icmp any any -> any any (msg:"m"; sid:2; detect:icmp_flood; kind:unsolicited_reply; count:100; seconds:5;)`)
+	f.Add(`alert icmp any any -> any any (msg:"m"; sid:1; detect:icmp_tunnel; count:10; seconds:60;)`)
 	f.Fuzz(func(t *testing.T, text string) {
 		rs, err := Parse(strings.NewReader(text), "fuzz")
 		if err != nil {
@@ -449,6 +513,8 @@ func FuzzLoad(f *testing.F) {
 		e := NewEngine(rs, EngineConfig{})
 		p := pkt{proto: "tcp", src: "10.0.0.1", dst: "10.0.0.2", sport: 1234, dport: 80, flags: "PA", payload: "GET / HTTP/1.1\r\n\r\n"}
 		e.Process(fuzzPacket(t, p))
+		e.Process(fuzzPacket(t, pkt{proto: "icmp", src: "10.0.0.1", dst: "10.0.0.1", ttl: 2, ethDst: [6]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}))
+		e.Process(parseFrame(fragFrame(t, "10.0.0.1", "10.0.0.2", 1, 17, 65528, true, make([]byte, 8)), t0))
 		e.Flush()
 	})
 }

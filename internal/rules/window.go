@@ -33,10 +33,13 @@ type windowEntry[K comparable] struct {
 }
 
 // windowEvent is one event time plus a small caller-defined tag (the SYN
-// flood detector stores the destination port).
+// flood detector stores the destination port) and value (icmp_tunnel
+// stores the payload size as the tag and its entropy as the value). The
+// value fits in what would be padding, so it costs no memory.
 type windowEvent struct {
 	t   time.Time
 	tag uint16
+	val float32
 }
 
 func newWindowCounter[K comparable](n int, span time.Duration, max int, stat *tableStat) *windowCounter[K] {
@@ -47,6 +50,11 @@ func newWindowCounter[K comparable](n int, span time.Duration, max int, stat *ta
 // of key, including this one, fall within span. The returned entry is
 // valid until the next call.
 func (w *windowCounter[K]) add(key K, t time.Time, tag uint16) (*windowEntry[K], bool) {
+	return w.addVal(key, t, tag, 0)
+}
+
+// addVal is add with a value stored alongside the tag.
+func (w *windowCounter[K]) addVal(key K, t time.Time, tag uint16, val float32) (*windowEntry[K], bool) {
 	w.prune(t)
 	el, ok := w.keys[key]
 	if ok {
@@ -66,7 +74,7 @@ func (w *windowCounter[K]) add(key K, t time.Time, tag uint16) (*windowEntry[K],
 			t = newest
 		}
 	}
-	ev := windowEvent{t: t, tag: tag}
+	ev := windowEvent{t: t, tag: tag, val: val}
 	if len(e.ring) < w.n {
 		e.ring = append(e.ring, ev)
 	} else {
@@ -146,4 +154,26 @@ func (e *windowEntry[K]) topTag() uint16 {
 		}
 	}
 	return best
+}
+
+// distinctTags returns the number of different tags among the stored
+// events.
+func (e *windowEntry[K]) distinctTags() int {
+	seen := make(map[uint16]struct{}, len(e.ring))
+	for _, ev := range e.ring {
+		seen[ev.tag] = struct{}{}
+	}
+	return len(seen)
+}
+
+// meanVal returns the mean value of the stored events.
+func (e *windowEntry[K]) meanVal() float64 {
+	if len(e.ring) == 0 {
+		return 0
+	}
+	var s float64
+	for _, ev := range e.ring {
+		s += float64(ev.val)
+	}
+	return s / float64(len(e.ring))
 }

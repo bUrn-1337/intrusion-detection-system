@@ -1,0 +1,8 @@
+{
+  "description": "20 Echo Requests from the spoofed victim 192.0.2.50 to the directed broadcast 192.168.1.255 (Ethernet broadcast); five hosts answer each. The Ethernet-broadcast smurf rule fires; the limited-broadcast rule (255.255.255.255) does not, and the replies alert nothing.",
+  "alerts": [
+    {"sid": 1000005, "kind": "alert", "src_ip": "192.0.2.50", "dst_ip": "192.168.1.255", "count": [1, 1]},
+    {"sid": 1000005, "kind": "summary", "src_ip": "192.0.2.50", "count": [20, 20]}
+  ],
+  "absent_sids": [1000006, 1000403]
+}

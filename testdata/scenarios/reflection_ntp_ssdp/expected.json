@@ -1,0 +1,8 @@
+{
+  "description": "Reflection against 192.0.2.50: 60 NTP servers (monlist responses from port 123) and 40 SSDP hosts (from port 1900) send it 3000 datagrams in 3s. The reflector-port rule fires at the 2001st; 3000 packets stay below the udp_flood rules. An NTP client syncing with four servers first does not fire.",
+  "alerts": [
+    {"sid": 1000013, "kind": "alert", "dst_ip": "192.0.2.50", "count": [1, 1], "details": {"track": "by_dst", "tracked_addr": "192.0.2.50"}},
+    {"sid": 1000013, "kind": "summary", "dst_ip": "192.0.2.50", "count": [1001, 1001]}
+  ],
+  "absent_sids": [1000010, 1000011, 1000012]
+}

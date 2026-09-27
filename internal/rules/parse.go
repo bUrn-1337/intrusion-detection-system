@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -17,9 +19,26 @@ import (
 // Limits on numeric option values. count bounds the per-key deque, so it
 // also bounds memory.
 const (
-	maxCount   = 100000
-	maxSeconds = 86400
-	maxLineLen = 1 << 20
+	maxCount = 100000
+	// maxByteCount bounds count for udp_flood metric:bytes, which sums
+	// bytes in fixed memory instead of storing events.
+	maxByteCount = 1 << 40
+	maxSeconds   = 86400
+	maxLineLen   = 1 << 20
+	// maxDistinct bounds distinct_ports, distinct_hosts and
+	// max_distinct_ports: a distinctCounter key holds that many values
+	// plus one and searches them linearly.
+	maxDistinct = 1000
+
+	defaultMaxDistinctPorts = 5
+	defaultMinSamples       = 10
+	defaultMaxHopDiff       = 3
+	defaultMinFragSize      = 256
+	// defaultMaxReplyRatio is udp_flood's max_reply_ratio: at most 1
+	// reply per 50 packets. A QUIC download acknowledges about every
+	// tenth to twentieth packet and a call talks back about as much as
+	// it receives, both far above it; a flood gets no UDP back at all.
+	defaultMaxReplyRatio = 0.02
 )
 
 // SyntaxError is one problem in a rule file.
@@ -74,10 +93,9 @@ func Parse(r io.Reader, name string) (*RuleSet, error) {
 	sc.Buffer(make([]byte, 0, 64*1024), maxLineLen)
 
 	var (
-		rules   []*Rule
-		errs    []*SyntaxError
-		sidLine = make(map[int]int)
-		lineNo  int
+		lines  []srcLine
+		errs   []lineError
+		lineNo int
 	)
 	for sc.Scan() {
 		lineNo++
@@ -85,39 +103,125 @@ func Parse(r io.Reader, name string) (*RuleSet, error) {
 		if line == "" || line[0] == '#' {
 			continue
 		}
-		rule, reasons := parseRule(line)
+		lines = append(lines, srcLine{lineNo, line})
+	}
+	if err := sc.Err(); err != nil {
+		if !errors.Is(err, bufio.ErrTooLong) {
+			return nil, err
+		}
+		errs = append(errs, lineError{lineNo + 1, fmt.Sprintf("line longer than %d bytes", maxLineLen)})
+	}
+
+	// Variables first: a rule may use one defined further down.
+	vars, verrs := parseVars(lines)
+	errs = append(errs, verrs...)
+	static, aerrs := parseARPBinds(lines)
+	errs = append(errs, aerrs...)
+
+	var (
+		rules   []*Rule
+		sidLine = make(map[int]int)
+	)
+	for _, l := range lines {
+		if isVarLine(l.text) || isARPBindLine(l.text) {
+			continue
+		}
+		rule, reasons := parseRule(l.text, vars)
 		if rule != nil {
 			if first, dup := sidLine[rule.SID]; dup {
 				reasons = append(reasons, fmt.Sprintf("duplicate sid %d (first defined on line %d)", rule.SID, first))
 			} else {
-				sidLine[rule.SID] = lineNo
+				sidLine[rule.SID] = l.n
 			}
 		}
 		for _, reason := range reasons {
-			errs = append(errs, &SyntaxError{File: name, Line: lineNo, Reason: reason})
+			errs = append(errs, lineError{l.n, reason})
 		}
 		if rule != nil && len(reasons) == 0 {
-			rule.File, rule.Line = name, lineNo
+			rule.File, rule.Line = name, l.n
 			rules = append(rules, rule)
 		}
 	}
-	if err := sc.Err(); err != nil {
-		if errors.Is(err, bufio.ErrTooLong) {
-			errs = append(errs, &SyntaxError{File: name, Line: lineNo + 1, Reason: fmt.Sprintf("line longer than %d bytes", maxLineLen)})
-		} else {
-			return nil, err
-		}
-	}
 	if len(errs) > 0 {
-		return nil, &LoadError{Errors: errs}
+		slices.SortStableFunc(errs, func(a, b lineError) int { return a.line - b.line })
+		le := &LoadError{}
+		for _, e := range errs {
+			le.Errors = append(le.Errors, &SyntaxError{File: name, Line: e.line, Reason: e.reason})
+		}
+		return nil, le
 	}
-	return newRuleSet(name, rules), nil
+	return newRuleSet(name, rules, static), nil
+}
+
+func isARPBindLine(line string) bool {
+	f := strings.Fields(line)
+	return len(f) > 0 && f[0] == "arpbind"
+}
+
+// parseARPBinds reads every "arpbind IP MAC" line: a static IPv4 -> MAC
+// binding for detect:arp_spoof kind:static_violation.
+func parseARPBinds(lines []srcLine) (map[netip.Addr]mac6, []lineError) {
+	var (
+		static map[netip.Addr]mac6
+		first  = make(map[netip.Addr]int)
+		errs   []lineError
+	)
+	for _, l := range lines {
+		if !isARPBindLine(l.text) {
+			continue
+		}
+		fail := func(format string, args ...any) {
+			errs = append(errs, lineError{l.n, fmt.Sprintf(format, args...)})
+		}
+		f := strings.Fields(l.text)
+		if len(f) != 3 {
+			fail("arpbind: want arpbind IPV4_ADDRESS MAC_ADDRESS")
+			continue
+		}
+		ip, err := netip.ParseAddr(f[1])
+		if err != nil || !ip.Is4() || ip.IsUnspecified() {
+			fail("arpbind address %q: want an IPv4 address other than 0.0.0.0", f[1])
+			continue
+		}
+		hw, err := net.ParseMAC(f[2])
+		m, ok := toMAC(hw)
+		if err != nil || !ok {
+			fail("arpbind MAC %q: want six hex octets, e.g. 00:11:22:33:44:55", f[2])
+			continue
+		}
+		if reason := invalidMACReason(m); reason != "" {
+			fail("arpbind MAC %s is %s, not a host address", m, reason)
+			continue
+		}
+		if n, dup := first[ip]; dup {
+			fail("arpbind %s given twice (first defined on line %d)", ip, n)
+			continue
+		}
+		first[ip] = l.n
+		if static == nil {
+			static = make(map[netip.Addr]mac6)
+		}
+		static[ip] = m
+	}
+	return static, errs
+}
+
+// srcLine is one non-blank, non-comment line of a rule file.
+type srcLine struct {
+	n    int
+	text string
+}
+
+// lineError is one problem, before it is given the file name.
+type lineError struct {
+	line   int
+	reason string
 }
 
 // parseRule parses one non-comment line. It returns every problem found.
 // The rule is nil only when the SID could not be determined, so duplicate
 // SIDs are still detected on lines with other errors.
-func parseRule(line string) (*Rule, []string) {
+func parseRule(line string, vars varTable) (*Rule, []string) {
 	var errs []string
 	fail := func(format string, args ...any) { errs = append(errs, fmt.Sprintf(format, args...)) }
 
@@ -135,8 +239,28 @@ func parseRule(line string) (*Rule, []string) {
 	if len(header) != 7 {
 		return nil, []string{fmt.Sprintf("header has %d fields, want 7: action proto src_addr src_port direction dst_addr dst_port", len(header))}
 	}
+	// Expand variables in the address and port fields. A field that fails
+	// is left as is, so it is not reported again below.
+	for i, what := range []string{2: "source address", 3: "source port", 5: "destination address", 6: "destination port"} {
+		if what == "" {
+			continue
+		}
+		kind := "address"
+		if i == 3 || i == 6 {
+			kind = "port"
+		}
+		f, err := vars.expand(header[i], kind, nil)
+		if err != nil {
+			fail("%s: %v", what, err)
+			header[i] = "any"
+			continue
+		}
+		header[i] = f
+	}
 
-	r := &Rule{Rev: 1, Severity: SeverityMedium, text: strings.Join(strings.Fields(line), " ")}
+	// text identifies the rule across reloads, so it holds the expanded
+	// header: changing a variable changes every rule that uses it.
+	r := &Rule{Rev: 1, Severity: SeverityMedium, text: strings.Join(header, " ") + " " + strings.Join(strings.Fields(line[open:]), " ")}
 	switch header[0] {
 	case "alert":
 		r.Action = ActionAlert
@@ -189,7 +313,7 @@ func parseRule(line string) (*Rule, []string) {
 	if err != nil {
 		fail("%v", err)
 	}
-	sidSet := parseOptions(r, opts, fail)
+	sidSet := parseOptions(r, opts, vars, fail)
 
 	if r.Msg == "" && !seenOption(opts, "msg") {
 		fail("missing required option msg")
@@ -300,18 +424,24 @@ func splitOptions(s string) ([]option, error) {
 }
 
 // parseOptions applies opts to r and reports whether sid was set.
-func parseOptions(r *Rule, opts []option, fail func(string, ...any)) bool {
+func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...any)) bool {
 	var (
 		sidSet     bool
 		seen       = make(map[string]bool)
 		lastContnt = -1 // index into r.contents that nocase applies to
 		nocaseDone = make(map[int]bool)
 		detectOpts []string
+		kind       string
+		countText  string // the count value, for the error when count > maxCount
 	)
 	once := map[string]bool{
 		"msg": true, "sid": true, "rev": true, "severity": true, "category": true,
 		"flags": true, "app_proto": true, "detection_filter": true, "detect": true,
 		"track": true, "count": true, "seconds": true, "min_incomplete_ratio": true,
+		"max_distinct_ports": true, "distinct_ports": true, "distinct_hosts": true,
+		"same_ip": true, "same_port": true, "eth_dst": true, "itype": true, "icode": true,
+		"ttl": true, "kind": true, "scope": true, "min_samples": true, "max_hop_diff": true,
+		"min_size": true, "arp_op": true, "dsize": true, "metric": true, "max_reply_ratio": true,
 	}
 	var ratio bool
 	for _, o := range opts {
@@ -322,7 +452,12 @@ func parseOptions(r *Rule, opts []option, fail func(string, ...any)) bool {
 			}
 			seen[o.key] = true
 		}
-		if o.key != "nocase" && !o.hasValue {
+		if noValue[o.key] {
+			if o.hasValue {
+				fail("%s takes no value", o.key)
+				continue
+			}
+		} else if !o.hasValue {
 			if knownOption(o.key) {
 				fail("option %s needs a value (%s:...)", o.key, o.key)
 			} else {
@@ -384,8 +519,6 @@ func parseOptions(r *Rule, opts []option, fail func(string, ...any)) bool {
 			lastContnt = len(r.contents) - 1
 		case "nocase":
 			switch {
-			case o.hasValue:
-				fail("nocase takes no value")
 			case lastContnt == -1:
 				fail("nocase must follow a content option")
 			case lastContnt >= 0 && nocaseDone[lastContnt]:
@@ -442,8 +575,8 @@ func parseOptions(r *Rule, opts []option, fail func(string, ...any)) bool {
 			}
 			r.filter = &ws
 		case "detect":
-			if v != DetectSYNFlood {
-				fail("detect %q: the only detector is %s", v, DetectSYNFlood)
+			if _, ok := detectorOptions[v]; !ok {
+				fail("detect %q: want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood or icmp_tunnel", v)
 				continue
 			}
 			r.Detect = v
@@ -460,12 +593,15 @@ func parseOptions(r *Rule, opts []option, fail func(string, ...any)) bool {
 			}
 		case "count":
 			detectOpts = append(detectOpts, o.key)
-			n, err := parsePositive(v, maxCount)
+			// Only udp_flood metric:bytes allows more than maxCount; that is
+			// checked after the loop.
+			n, err := parsePositive(v, maxByteCount)
 			if err != nil {
+				_, err = parsePositive(v, maxCount)
 				fail("count: %v", err)
 				continue
 			}
-			r.detect.count = n
+			r.detect.count, countText = n, v
 		case "seconds":
 			detectOpts = append(detectOpts, o.key)
 			n, err := parsePositive(v, maxSeconds)
@@ -482,6 +618,130 @@ func parseOptions(r *Rule, opts []option, fail func(string, ...any)) bool {
 				continue
 			}
 			r.minRatio, ratio = f, true
+		case "max_distinct_ports":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, maxDistinct)
+			if err != nil {
+				fail("max_distinct_ports: %v", err)
+				continue
+			}
+			r.maxPorts = n
+		case "distinct_ports", "distinct_hosts":
+			detectOpts = append(detectOpts, o.key)
+			if seen["distinct_ports"] && seen["distinct_hosts"] {
+				fail("distinct_ports and distinct_hosts cannot both be given")
+				continue
+			}
+			n, err := parsePositive(v, maxDistinct)
+			if err != nil {
+				fail("%s: %v", o.key, err)
+				continue
+			}
+			r.distinct = n
+		case "same_ip":
+			r.sameIP = true
+		case "same_port":
+			r.samePort = true
+		case "eth_dst":
+			kind, neg := strings.CutPrefix(v, "!")
+			switch kind {
+			case "broadcast":
+				r.ethDst = ethBroadcast
+			case "multicast":
+				r.ethDst = ethMulticast
+			case "zero":
+				r.ethDst = ethZero
+			default:
+				fail("eth_dst %q: want broadcast, multicast or zero, optionally negated with '!'", v)
+				continue
+			}
+			r.ethDstNeg = neg
+		case "itype", "icode":
+			n, err := strconv.ParseUint(v, 10, 8)
+			if err != nil {
+				fail("%s %q: want an integer from 0 to 255", o.key, v)
+				continue
+			}
+			if o.key == "itype" {
+				r.hasIType, r.itype = true, uint8(n)
+			} else {
+				r.hasICode, r.icode = true, uint8(n)
+			}
+		case "ttl":
+			c, err := parseTTL(v)
+			if err != nil {
+				fail("ttl: %v", err)
+				continue
+			}
+			r.ttl = c
+		case "dsize":
+			c, err := parseDsize(v)
+			if err != nil {
+				fail("dsize: %v", err)
+				continue
+			}
+			r.dsize = c
+		case "kind":
+			// Checked below, once the detector is known.
+			detectOpts = append(detectOpts, o.key)
+			kind = v
+		case "arp_op":
+			switch v {
+			case "request":
+				r.arpOp = packet.ARPRequest
+			case "reply":
+				r.arpOp = packet.ARPReply
+			default:
+				fail("arp_op %q: want request or reply", v)
+			}
+		case "scope":
+			detectOpts = append(detectOpts, o.key)
+			switch v {
+			case "external":
+				r.external = true
+			case "all":
+			default:
+				fail("scope %q: want external or all", v)
+			}
+		case "min_samples":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, maxCount)
+			if err != nil {
+				fail("min_samples: %v", err)
+				continue
+			}
+			r.minSamples = n
+		case "max_hop_diff":
+			detectOpts = append(detectOpts, o.key)
+			n, err := strconv.ParseUint(v, 10, 8)
+			if err != nil {
+				fail("max_hop_diff %q: want an integer from 0 to 255", v)
+				continue
+			}
+			r.maxHopDiff = int(n)
+		case "metric":
+			detectOpts = append(detectOpts, o.key)
+			if v != MetricPackets && v != MetricBytes {
+				fail("metric %q: want packets or bytes", v)
+				continue
+			}
+			r.metric = v
+		case "max_reply_ratio":
+			detectOpts = append(detectOpts, o.key)
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil || !(f >= 0 && f <= 1) {
+				fail("max_reply_ratio %q: want a number from 0 to 1", v)
+				continue
+			}
+			r.maxReplyRatio = f
+		case "min_size":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, 65535)
+			if err != nil {
+				fail("min_size: %v", err)
+				continue
+			}
+			r.minSize = n
 		default:
 			fail("unknown option %q", o.key)
 		}
@@ -489,24 +749,119 @@ func parseOptions(r *Rule, opts []option, fail func(string, ...any)) bool {
 
 	if r.Detect == "" {
 		if len(detectOpts) > 0 {
-			fail("option %s is only valid with detect:%s", detectOpts[0], DetectSYNFlood)
+			fail("option %s is only valid with detect:%s", detectOpts[0], detectorsTaking(detectOpts[0]))
 		}
 		return sidSet
 	}
 	// Detector rule.
+	if r.detect.count > maxCount && (r.Detect != DetectUDPFlood || r.metric != MetricBytes) {
+		_, err := parsePositive(countText, maxCount)
+		fail("count: %v (larger counts need detect:udp_flood metric:bytes)", err)
+	}
+	spec := detectorOptions[r.Detect]
 	var missing []string
-	for _, k := range []string{"track", "count", "seconds"} {
+	for _, k := range spec.required {
 		if !seen[k] {
 			missing = append(missing, k)
 		}
 	}
 	if len(missing) > 0 {
-		fail("detect:%s needs %s", DetectSYNFlood, strings.Join(missing, ", "))
+		fail("detect:%s needs %s", r.Detect, strings.Join(missing, ", "))
 	}
-	if !ratio {
-		r.minRatio = 0.8
+	for _, k := range detectOpts {
+		if !slices.Contains(spec.required, k) && !slices.Contains(spec.optional, k) {
+			fail("option %s is not valid with detect:%s", k, r.Detect)
+			break
+		}
 	}
-	for _, k := range []string{"flags", "content", "app_proto", "app_field", "app_reason", "detection_filter"} {
+	switch r.Detect {
+	case DetectSYNFlood:
+		if !ratio {
+			r.minRatio = 0.8
+		}
+		if r.maxPorts == 0 {
+			r.maxPorts = defaultMaxDistinctPorts
+		}
+	case DetectTTLAnomaly:
+		if !seen["scope"] {
+			r.external = true
+		}
+		if !seen["min_samples"] {
+			r.minSamples = defaultMinSamples
+		}
+		if !seen["max_hop_diff"] {
+			r.maxHopDiff = defaultMaxHopDiff
+		}
+		if r.external {
+			home, ok := vars["HOME_NET"]
+			switch {
+			case !ok:
+				fail("scope:external needs a HOME_NET variable (var HOME_NET ...), or use scope:all")
+			case !home.bad && !home.addr:
+				fail("scope:external: $HOME_NET holds ports, not addresses")
+			case !home.bad:
+				r.homeNet, _ = parseAddrSpec(home.value)
+			}
+		}
+	case DetectFragAttack:
+		switch kind {
+		case "":
+		case FragOverlap, FragTiny, FragOversize, FragFlood:
+			r.fragKind = kind
+		default:
+			fail("kind %q: want overlap, tiny, oversize or flood", kind)
+		}
+		flood := r.fragKind == FragFlood
+		if flood && (!seen["count"] || !seen["seconds"]) {
+			fail("detect:frag_attack kind:flood needs count and seconds")
+		}
+		if r.fragKind != "" && !flood && (seen["count"] || seen["seconds"]) {
+			fail("count and seconds are only valid with kind:flood")
+		}
+		if seen["min_size"] && r.fragKind != FragTiny && r.fragKind != "" {
+			fail("min_size is only valid with kind:tiny")
+		}
+		if r.minSize == 0 {
+			r.minSize = defaultMinFragSize
+		}
+	case DetectARPSpoof:
+		if kind != "" && !slices.Contains(arpKinds, kind) {
+			fail("kind %q: want %s", kind, strings.Join(arpKinds, ", "))
+			break
+		}
+		r.arpKind = kind
+		counted := slices.Contains(arpCounted, kind)
+		if counted && (!seen["count"] || !seen["seconds"]) {
+			fail("detect:arp_spoof kind:%s needs count and seconds", kind)
+		}
+		if kind != "" && !counted && (seen["count"] || seen["seconds"]) {
+			fail("count and seconds are only valid with kind:%s", strings.Join(arpCounted, ", kind:"))
+		}
+		if kind == ARPMultiIP && r.detect.count > maxDistinct {
+			fail("kind:multi_ip count %d: at most %d", r.detect.count, maxDistinct)
+		}
+	case DetectUDPFlood:
+		if r.metric == "" {
+			r.metric = MetricPackets
+		}
+		if !seen["max_reply_ratio"] {
+			r.maxReplyRatio = defaultMaxReplyRatio
+		}
+	case DetectICMPFlood:
+		if kind != "" && !slices.Contains(icmpKinds, kind) {
+			fail("kind %q: want %s", kind, strings.Join(icmpKinds, ", "))
+			break
+		}
+		r.icmpKind = kind
+		switch {
+		case kind == ICMPEcho && !seen["track"]:
+			fail("detect:icmp_flood kind:echo needs track")
+		case kind != ICMPEcho && kind != "" && seen["track"]:
+			fail("track is only valid with kind:echo (kind:%s always tracks the receiver)", kind)
+		}
+	}
+	for _, k := range []string{"flags", "content", "app_proto", "app_field", "app_reason", "detection_filter",
+		"same_ip", "same_port", "eth_dst", "itype", "icode", "ttl", "arp_op", "dsize"} {
 		if seenOption(opts, k) {
 			fail("option %s cannot be combined with detect", k)
 		}
@@ -518,10 +873,51 @@ func knownOption(k string) bool {
 	switch k {
 	case "msg", "sid", "rev", "severity", "category", "flags", "content", "nocase",
 		"app_proto", "app_field", "app_reason", "detection_filter", "detect",
-		"track", "count", "seconds", "min_incomplete_ratio":
+		"track", "count", "seconds", "min_incomplete_ratio", "max_distinct_ports",
+		"distinct_ports", "distinct_hosts", "same_ip", "same_port", "eth_dst", "itype",
+		"icode", "ttl", "kind", "scope", "min_samples", "max_hop_diff", "min_size", "arp_op",
+		"dsize", "metric", "max_reply_ratio":
 		return true
 	}
 	return false
+}
+
+// noValue lists the options written without ":value".
+var noValue = map[string]bool{"nocase": true, "same_ip": true, "same_port": true}
+
+// detectorOptions lists, per detector, the options it needs and the ones
+// it may take. seconds is shared; the scan detectors always track by
+// source, so they take neither track nor count.
+var detectorOptions = map[string]struct{ required, optional []string }{
+	DetectSYNFlood:   {required: []string{"track", "count", "seconds"}, optional: []string{"min_incomplete_ratio", "max_distinct_ports"}},
+	DetectPortScan:   {required: []string{"distinct_ports", "seconds"}},
+	DetectHostSweep:  {required: []string{"distinct_hosts", "seconds"}},
+	DetectPingSweep:  {required: []string{"distinct_hosts", "seconds"}},
+	DetectTTLAnomaly: {required: []string{"count", "seconds"}, optional: []string{"min_samples", "max_hop_diff", "scope"}},
+	// count and seconds are required for kind:flood only; parseOptions
+	// checks that.
+	DetectFragAttack: {required: []string{"kind"}, optional: []string{"count", "seconds", "min_size"}},
+	// count and seconds are required for flip_flop, unsolicited_reply and
+	// multi_ip only; parseOptions checks that.
+	DetectARPSpoof: {required: []string{"kind"}, optional: []string{"count", "seconds"}},
+	DetectUDPFlood: {required: []string{"track", "count", "seconds"}, optional: []string{"metric", "max_reply_ratio"}},
+	// track is required for kind:echo only and not allowed for the other
+	// kinds; parseOptions checks that.
+	DetectICMPFlood:  {required: []string{"kind", "count", "seconds"}, optional: []string{"track"}},
+	DetectICMPTunnel: {required: []string{"count", "seconds"}},
+}
+
+// detectorsTaking names the detectors that accept option k, for errors.
+func detectorsTaking(k string) string {
+	var names []string
+	for _, d := range []string{DetectSYNFlood, DetectPortScan, DetectHostSweep, DetectPingSweep, DetectTTLAnomaly, DetectFragAttack, DetectARPSpoof,
+		DetectUDPFlood, DetectICMPFlood, DetectICMPTunnel} {
+		spec := detectorOptions[d]
+		if slices.Contains(spec.required, k) || slices.Contains(spec.optional, k) {
+			names = append(names, d)
+		}
+	}
+	return strings.Join(names, ", detect:")
 }
 
 // checkProtoOptions reports options that cannot apply to r.Proto.
@@ -529,8 +925,51 @@ func checkProtoOptions(r *Rule, fail func(string, ...any)) {
 	if r.hasFlags && r.Proto != ProtoTCP {
 		fail("flags requires protocol tcp")
 	}
-	if r.Detect != "" && r.Proto != ProtoTCP {
-		fail("detect:%s requires protocol tcp", r.Detect)
+	switch r.Detect {
+	case DetectSYNFlood:
+		if r.Proto != ProtoTCP {
+			fail("detect:%s requires protocol tcp", r.Detect)
+		}
+	case DetectPortScan, DetectHostSweep:
+		if r.Proto != ProtoIP && r.Proto != ProtoTCP && r.Proto != ProtoUDP {
+			fail("detect:%s requires protocol ip, tcp or udp", r.Detect)
+		}
+	case DetectPingSweep:
+		if r.Proto != ProtoIP && r.Proto != ProtoICMP {
+			fail("detect:%s requires protocol ip or icmp", r.Detect)
+		}
+	case DetectTTLAnomaly:
+		if r.Proto == ProtoARP {
+			fail("detect:%s requires protocol ip, tcp, udp or icmp", r.Detect)
+		}
+	case DetectFragAttack:
+		if r.Proto != ProtoIP {
+			fail("detect:%s requires protocol ip", r.Detect)
+		}
+	case DetectARPSpoof:
+		if r.Proto != ProtoARP {
+			fail("detect:%s requires protocol arp", r.Detect)
+		}
+	case DetectUDPFlood:
+		if r.Proto != ProtoUDP {
+			fail("detect:%s requires protocol udp", r.Detect)
+		}
+	case DetectICMPFlood, DetectICMPTunnel:
+		if r.Proto != ProtoICMP {
+			fail("detect:%s requires protocol icmp", r.Detect)
+		}
+	}
+	if r.arpOp != 0 && r.Proto != ProtoARP {
+		fail("arp_op requires protocol arp")
+	}
+	if r.samePort && !hasPortsProto(r.Proto) {
+		fail("same_port requires protocol tcp or udp")
+	}
+	if (r.sameIP || r.ttl.op != 0 || r.dsize.op != 0) && r.Proto == ProtoARP {
+		fail("same_ip, ttl and dsize require an IP protocol (ip, tcp, udp or icmp)")
+	}
+	if (r.hasIType || r.hasICode) && r.Proto != ProtoICMP && r.Proto != ProtoIP {
+		fail("itype and icode require protocol icmp or ip")
 	}
 	if r.Detect != "" && r.Action == ActionPass {
 		fail("detect cannot be used with a pass rule")
@@ -541,6 +980,67 @@ func checkProtoOptions(r *Rule, fail func(string, ...any)) {
 	if (r.appProto != "" || len(r.appFields) > 0 || len(r.appReasons) > 0) && (r.Proto == ProtoICMP || r.Proto == ProtoARP) {
 		fail("app_proto, app_field and app_reason require protocol ip, tcp or udp")
 	}
+}
+
+func hasPortsProto(p Proto) bool { return p == ProtoTCP || p == ProtoUDP }
+
+// parseTTL parses "N", "<N" or ">N". A comparison that no TTL can
+// satisfy (<0, >255) is an error.
+func parseTTL(v string) (ttlCheck, error) {
+	c := ttlCheck{op: '='}
+	if v != "" && (v[0] == '<' || v[0] == '>') {
+		c.op, v = v[0], v[1:]
+	}
+	n, err := strconv.ParseUint(v, 10, 8)
+	if err != nil {
+		return c, fmt.Errorf("%q: want N, <N or >N with N from 0 to 255", v)
+	}
+	c.n = uint8(n)
+	if c.op == '<' && n == 0 || c.op == '>' && n == 255 {
+		return c, fmt.Errorf("%c%d matches no TTL", c.op, n)
+	}
+	return c, nil
+}
+
+// parseDsize parses "N", "<N", ">N" or "N<>M" (inclusive), with sizes
+// from 0 to 65535. A comparison no payload can satisfy (<0, >65535, or a
+// range with N > M) is an error.
+func parseDsize(v string) (dsizeCheck, error) {
+	whole := v
+	num := func(s string) (int, error) {
+		n, err := strconv.ParseUint(s, 10, 16)
+		if err != nil {
+			return 0, fmt.Errorf("%q: want N, <N, >N or N<>M with sizes from 0 to 65535", whole)
+		}
+		return int(n), nil
+	}
+	if lo, hi, ok := strings.Cut(v, "<>"); ok {
+		a, err := num(lo)
+		if err != nil {
+			return dsizeCheck{}, err
+		}
+		b, err := num(hi)
+		if err != nil {
+			return dsizeCheck{}, err
+		}
+		if a > b {
+			return dsizeCheck{}, fmt.Errorf("%q: range is empty (%d > %d)", v, a, b)
+		}
+		return dsizeCheck{op: 'r', lo: a, hi: b}, nil
+	}
+	c := dsizeCheck{op: '='}
+	if v != "" && (v[0] == '<' || v[0] == '>') {
+		c.op, v = v[0], v[1:]
+	}
+	n, err := num(v)
+	if err != nil {
+		return c, err
+	}
+	c.lo = n
+	if c.op == '<' && n == 0 || c.op == '>' && n == 65535 {
+		return c, fmt.Errorf("%c%d matches no payload size", c.op, n)
+	}
+	return c, nil
 }
 
 func isName(s string) bool {

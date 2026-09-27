@@ -1,0 +1,9 @@
+{
+  "description": "Two IPv6 datagrams from 2001:db8:bad::1 whose 2048-byte Destination Options header does not fit in the 1232-byte first fragment, pushing the UDP header into the second (forbidden by RFC 7112). The first fragment is not under min_size, so the header-chain reason is what fires.",
+  "alerts": [
+    {"sid": 1000702, "kind": "alert", "src_ip": "2001:db8:bad::1", "dst_ip": "2001:db8::10", "count": [1, 1],
+     "details": {"kind": "tiny", "payload_len": "1232", "reason": "IPv6 first fragment does not contain the whole header chain and upper-layer header (RFC 7112)"}},
+    {"sid": 1000702, "kind": "summary", "src_ip": "2001:db8:bad::1", "count": [2, 2]}
+  ],
+  "absent_sids": [1000701, 1000703, 1000704]
+}

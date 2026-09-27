@@ -178,6 +178,9 @@ func parseIPv4(p *packet.ParsedPacket) {
 		p.AddError(fmt.Sprintf("ipv4: total length %d is less than header length %d", totalLen, hdrLen))
 		return
 	}
+	if p.IPFragmented {
+		p.FragPayloadLen = uint32(totalLen - hdrLen)
+	}
 	if p.FragOffset > 0 {
 		return // non-first fragment: no transport header
 	}
@@ -270,6 +273,10 @@ func parseIPv6(p *packet.ParsedPacket) {
 			p.MoreFragments = fragField&0x1 != 0
 			p.IPFragmented = p.MoreFragments || p.FragOffset > 0
 			p.IPID = binary.BigEndian.Uint32(raw[off+4:])
+			if p.IPFragmented {
+				// off+extLen <= end <= l3+totalLen, so this is not negative.
+				p.FragPayloadLen = uint32(l3 + totalLen - (off + extLen))
+			}
 			if p.FragOffset > 0 {
 				// The rest is fragment data, not more headers.
 				p.IPProto = raw[off]

@@ -1,0 +1,9 @@
+{
+  "description": "203.0.113.50 sends a FIN-only packet to ports 1-100 of 192.0.2.10 (nmap -sF); closed ports answer RST/ACK, open ports 22 and 80 stay silent. port_scan fires with scan type fin. There is no single-packet FIN rule (see rules.conf).",
+  "alerts": [
+    {"sid": 1000401, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"detector": "port_scan", "distinct_ports": "20", "scan_types": "fin:20", "open_ports": ""}},
+    {"sid": 1000401, "kind": "summary", "src_ip": "203.0.113.50", "count": [81, 81]}
+  ],
+  "absent_sids": [1000001, 1000002, 1000402, 1000404,1000405,1000406]
+}

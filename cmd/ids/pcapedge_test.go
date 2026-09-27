@@ -342,11 +342,16 @@ func TestSpoofedFloodTableCap(t *testing.T) {
 	if byDst != 1 || bySrc != 0 {
 		t.Errorf("by_dst alerts %d (want 1), by_src alerts %d (want 0)", byDst, bySrc)
 	}
-	hs, sf := st.Engine.Tables["handshake"], st.Engine.Tables["syn_flood"]
+	hs, sf, ta := st.Engine.Tables["handshake"], st.Engine.Tables["syn_flood"], st.Engine.Tables["ttl_anomaly"]
 	// The handshake table holds at most 50,000 open handshakes, so at
 	// least n-50,000 were evicted. syn_flood holds one by_dst key plus at
-	// most 50,000 by_src keys.
-	if hs.Evictions < n-50_000 || sf.Evictions < n-50_000 || sf.Keys > 50_001 || st.Engine.Evictions != hs.Evictions+sf.Evictions {
+	// most 50,000 by_src keys. ttl_anomaly tracks every (external) source
+	// and holds at most 50,000.
+	var sum uint64
+	for _, tb := range st.Engine.Tables {
+		sum += tb.Evictions
+	}
+	if hs.Evictions < n-50_000 || sf.Evictions < n-50_000 || sf.Keys > 50_001 || ta.Keys > 50_000 || ta.Evictions < n-50_000 || st.Engine.Evictions != sum {
 		t.Errorf("engine stats %+v", st.Engine)
 	}
 }

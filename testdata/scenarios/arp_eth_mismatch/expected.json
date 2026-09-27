@@ -1,0 +1,8 @@
+{
+  "description": "Three replies for 10.1.1.30 sent from the attacker's NIC (Ethernet source 02:00:00:00:00:66) carrying 10.1.1.30's real MAC as ARP sender. The binding does not change, but the Ethernet source differs from the ARP sender MAC: mismatch fires once and summarizes the three.",
+  "alerts": [
+    {"sid": 1000806, "kind": "alert", "src_ip": "10.1.1.30", "dst_ip": "10.1.1.10", "count": [1, 1], "details": {"eth_src": "02:00:00:00:00:66", "arp_sender_mac": "02:00:00:00:00:1e"}},
+    {"sid": 1000806, "kind": "summary", "src_ip": "10.1.1.30", "count": [3, 3]}
+  ],
+  "absent_sids": [1000801, 1000802, 1000803, 1000804, 1000805, 1000807]
+}

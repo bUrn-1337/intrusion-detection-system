@@ -1,0 +1,4 @@
+{
+  "description": "A QUIC download: 203.0.113.80:443 sends 10.0.0.5 15000 1200-byte packets in 4s, and the client acknowledges every 15th (about 7% replies, above the 2% limit). Nothing fires.",
+  "alerts": []
+}

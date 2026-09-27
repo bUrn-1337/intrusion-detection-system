@@ -1,0 +1,5 @@
+{
+  "description": "The capture starts while a client has 60 connections open to 30 servers on 30 ports; they end with FIN/ACK exchanges, a few with a last data segment or an RST. FIN/ACK, ACK and RST from unseen connections are not probes: nothing fires.",
+  "alerts": [],
+  "absent_sids": [1000401, 1000402, 1000404, 1000405, 1000406]
+}

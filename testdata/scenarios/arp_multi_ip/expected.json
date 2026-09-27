@@ -1,0 +1,8 @@
+{
+  "description": "One MAC (02:00:00:00:00:66) answers the requests for 20 addresses (10.1.1.100-119), one every 2s. Every reply is solicited, so only multi_ip fires, on the tenth address (18s), deduplicated per MAC.",
+  "alerts": [
+    {"sid": 1000805, "kind": "alert", "src_ip": "10.1.1.109", "count": [1, 1], "details": {"mac": "02:00:00:00:00:66", "distinct_ips": "10", "ips": "10.1.1.100,10.1.1.101,10.1.1.102,10.1.1.103,10.1.1.104,10.1.1.105,10.1.1.106,10.1.1.107,10.1.1.108,10.1.1.109"}},
+    {"sid": 1000805, "kind": "summary", "count": [11, 11]}
+  ],
+  "absent_sids": [1000801, 1000802, 1000803, 1000804, 1000806, 1000807]
+}
