@@ -27,7 +27,7 @@
 //
 //	2026-09-25T10:00:00.123456Z  len=74  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=6 ttl=64  TCP 40000 -> 443 [SYN] seq=1000 ack=0 win=64240 len=0
 //	2026-09-25T10:00:00.153456Z  len=85  02:00:00:00:00:0a -> 02:00:00:00:00:0b  IPv4 10.0.0.1 -> 10.0.0.2 proto=17 ttl=64  UDP 40000 -> 53 len=51  DNS query google.com A
-//	2026-09-25T10:00:00.173456Z  len=98  02:00:00:00:00:0b -> 02:00:00:00:00:0a  IPv4 10.0.0.2 -> 10.0.0.1 proto=1 ttl=64  ICMP Echo Reply
+//	2026-09-25T10:00:00.173456Z  len=98  02:00:00:00:00:0b -> 02:00:00:00:00:0a  IPv4 10.0.0.2 -> 10.0.0.1 proto=1 ttl=64  ICMP Echo Reply id=4 seq=1 len=56
 //	2026-09-25T10:00:00.223456Z  len=42  02:00:00:00:00:0a -> ff:ff:ff:ff:ff:ff  ARP request who-has 10.0.0.2 tell 10.0.0.1
 //	ALERT [high] sid=1000001 "SYN flood against one destination" TCP 10.0.0.1:40000 -> 10.0.0.2:80 count=1 time=2026-09-25T10:00:03.99Z detector=syn_flood ...
 //	SUMMARY [high] sid=1000001 "SYN flood against one destination" TCP 10.0.0.1:40000 -> 10.0.0.2:80 count=401 first=2026-09-25T10:00:03.99Z last=2026-09-25T10:00:07.99Z ...
@@ -315,6 +315,9 @@ func describeL4(p *packet.ParsedPacket) string {
 		s = fmt.Sprintf("UDP %d -> %d len=%d", p.SrcPort, p.DstPort, p.UDPLen)
 	case packet.L4ICMP:
 		s = "ICMP " + upper.ICMPLabel(p.IPVersion, p.ICMPType, p.ICMPCode)
+		if p.HasICMPEcho {
+			s += fmt.Sprintf(" id=%d seq=%d len=%d", p.ICMPEchoID, p.ICMPEchoSeq, len(p.Payload()))
+		}
 	default:
 		return ""
 	}

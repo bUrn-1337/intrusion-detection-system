@@ -1,0 +1,5 @@
+{
+  "description": "Ten minutes of a quiet LAN: ten hosts and the gateway resolve each other (broadcast requests, replies, unicast refresh requests), and 10.1.1.20 boots at 5 minutes with three RFC 5227 probes from 0.0.0.0 and a two-packet gratuitous announcement. No arp_spoof kind fires: every reply answers a request and the announcement is within the two free gratuitous ARPs.",
+  "alerts": [],
+  "absent_sids": [1000801, 1000802, 1000803, 1000804, 1000805, 1000806, 1000807]
+}

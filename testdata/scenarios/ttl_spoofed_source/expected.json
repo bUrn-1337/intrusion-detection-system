@@ -1,0 +1,9 @@
+{
+  "description": "198.51.100.20 sends 20 DNS queries at TTL 50 (14 hops from 64), establishing its distance. Then 10 SYNs claiming its address arrive at TTL 120 (8 hops from 128): 6 hops off. The SYNs are held back until their handshakes end; none completes, so each counts when it times out (3 s): the 5th fires ttl_anomaly and the next 5 are summarized. By then the spoofed distance has 10 samples and is listed as established too.",
+  "alerts": [
+    {"sid": 1000601, "kind": "alert", "src_ip": "198.51.100.20", "count": [1, 1],
+     "details": {"detector": "ttl_anomaly", "established_distances": "14(20),8(10)", "anomalous_distances": "8", "sample_ttls": "120", "count": "5"}},
+    {"sid": 1000601, "kind": "summary", "src_ip": "198.51.100.20", "count": [6, 6]}
+  ],
+  "absent_sids": [1000001, 1000002, 1000401]
+}

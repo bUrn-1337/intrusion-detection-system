@@ -1,0 +1,9 @@
+{
+  "description": "nmap -sS -f from 203.0.113.80 against ports 22, 80 and 443: each 20-byte TCP header is split into fragments of 8, 8 and 4 bytes. The 6 non-final fragments are tiny; the first fragment of each carries only 8 bytes of the TCP header, which is the reason given.",
+  "alerts": [
+    {"sid": 1000702, "kind": "alert", "src_ip": "203.0.113.80", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"kind": "tiny", "frag_offset": "0", "reason": "first fragment carries 8 bytes of the TCP header, need 20"}},
+    {"sid": 1000702, "kind": "summary", "src_ip": "203.0.113.80", "count": [6, 6]}
+  ],
+  "absent_sids": [1000701, 1000703, 1000704]
+}

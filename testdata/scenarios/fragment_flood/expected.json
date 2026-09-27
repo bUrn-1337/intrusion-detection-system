@@ -1,0 +1,9 @@
+{
+  "description": "203.0.113.66 sends only the first fragments of 60 UDP datagrams in 0.6s. They expire incomplete 30s later; the 50th expiry within 30s fires the fragment flood rule and the other 10 are summarized. The fragments are 1480 bytes, so none is tiny.",
+  "alerts": [
+    {"sid": 1000704, "kind": "alert", "src_ip": "203.0.113.66", "count": [1, 1],
+     "details": {"kind": "flood", "incomplete_datagrams": "50", "timeout": "30s"}},
+    {"sid": 1000704, "kind": "summary", "src_ip": "203.0.113.66", "count": [11, 11]}
+  ],
+  "absent_sids": [1000701, 1000702, 1000703]
+}

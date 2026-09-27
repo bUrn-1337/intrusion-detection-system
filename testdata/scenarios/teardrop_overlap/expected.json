@@ -1,0 +1,9 @@
+{
+  "description": "Three teardrop datagrams from 203.0.113.70: a 1480-byte first fragment, then a final fragment at offset 800 lying inside it. The overlap rule fires on the first and summarizes the three. The datagrams count as complete, so no fragment flood.",
+  "alerts": [
+    {"sid": 1000701, "kind": "alert", "src_ip": "203.0.113.70", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"kind": "overlap", "fragment": "800-1000", "overlaps": "0-1480"}},
+    {"sid": 1000701, "kind": "summary", "src_ip": "203.0.113.70", "count": [3, 3]}
+  ],
+  "absent_sids": [1000702, 1000703, 1000704]
+}

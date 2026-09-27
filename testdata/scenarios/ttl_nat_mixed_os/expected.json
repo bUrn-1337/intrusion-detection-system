@@ -1,0 +1,5 @@
+{
+  "description": "One NAT address, 198.51.100.30, with a Linux host (initial TTL 64, arriving at 50) and a Windows host (initial 128, arriving at 114) behind it, interleaved for 60 packets. Both are 14 hops away, so there is one distance and nothing fires.",
+  "alerts": [],
+  "absent_sids": [1000601]
+}

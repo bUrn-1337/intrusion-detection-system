@@ -1,0 +1,9 @@
+{
+  "description": "Three requests whose ARP sender MAC no host can have: broadcast (from 10.1.1.40), IPv4 multicast 01:00:5e:00:00:01 (10.1.1.41) and all zeros (10.1.1.42). invalid_mac fires for each; such MACs are never learned. The frames use the same MAC as Ethernet source, so mismatch does not fire.",
+  "alerts": [
+    {"sid": 1000807, "kind": "alert", "src_ip": "10.1.1.40", "count": [1, 1], "details": {"reason": "broadcast", "mac": "ff:ff:ff:ff:ff:ff"}},
+    {"sid": 1000807, "kind": "alert", "src_ip": "10.1.1.41", "count": [1, 1], "details": {"reason": "multicast", "mac": "01:00:5e:00:00:01"}},
+    {"sid": 1000807, "kind": "alert", "src_ip": "10.1.1.42", "count": [1, 1], "details": {"reason": "zero", "mac": "00:00:00:00:00:00"}}
+  ],
+  "absent_sids": [1000801, 1000802, 1000803, 1000804, 1000805, 1000806]
+}

@@ -20,14 +20,28 @@ import (
 //
 // by_dst is the one that catches spoofed floods: every SYN has a
 // different fake source, so no single source ever reaches count.
+//
+// A third condition keeps a SYN scan from looking like a flood: the key's
+// incomplete handshakes within the last seconds must have hit at most
+// maxPorts distinct destination ports. A flood hammers one service; a
+// scan touches many ports and is left to port_scan. The ports are kept in
+// a distinctCounter that holds maxPorts+1 of them, which is enough to
+// tell. It is updated with inc and has the same keys, so its table
+// statistics are kept apart and not reported.
 type synFlood struct {
-	rule *Rule
-	inc  *windowCounter[netip.Addr]
-	comp *windowCounter[netip.Addr] // nil when minRatio is 0
+	rule      *Rule
+	inc       *windowCounter[netip.Addr]
+	comp      *windowCounter[netip.Addr] // nil when minRatio is 0
+	ports     *distinctCounter[netip.Addr, uint16]
+	portsStat tableStat
 }
 
 func newSYNFlood(r *Rule, max int, stat *tableStat) *synFlood {
-	d := &synFlood{rule: r, inc: newWindowCounter[netip.Addr](r.detect.count, r.detect.span(), max, stat)}
+	d := &synFlood{
+		rule: r,
+		inc:  newWindowCounter[netip.Addr](r.detect.count, r.detect.span(), max, stat),
+	}
+	d.ports = newDistinctCounter[netip.Addr, uint16](r.maxPorts, r.detect.span(), max, &d.portsStat)
 	if r.minRatio > 0 {
 		keep := float64(r.detect.count)*(1-r.minRatio)/r.minRatio + 2
 		d.comp = newWindowCounter[netip.Addr](int(math.Min(keep, maxCount)), r.detect.span(), max, stat)
@@ -48,8 +62,9 @@ func (d *synFlood) observe(ev hsEvent) (netip.Addr, func() map[string]string, bo
 		}
 		return key, nil, false
 	}
+	ports := d.ports.add(key, ev.key.sport, ev.t, 0).size()
 	ent, full := d.inc.add(key, ev.t, ev.key.sport)
-	if !full {
+	if !full || ports > d.rule.maxPorts {
 		return key, nil, false
 	}
 	n := ent.size()
@@ -66,14 +81,15 @@ func (d *synFlood) observe(ev hsEvent) (netip.Addr, func() map[string]string, bo
 	// Called synchronously by the engine, before ent can change.
 	details := func() map[string]string {
 		return map[string]string{
-			"detector":     DetectSYNFlood,
-			"track":        d.rule.detect.track.String(),
-			"tracked_addr": key.String(),
-			"incomplete":   strconv.Itoa(n),
-			"completed":    strconv.Itoa(completed),
-			"ratio":        strconv.FormatFloat(ratio, 'f', 2, 64),
-			"top_dst_port": strconv.Itoa(int(ent.topTag())),
-			"window":       span.Round(time.Millisecond).String(),
+			"detector":       DetectSYNFlood,
+			"track":          d.rule.detect.track.String(),
+			"tracked_addr":   key.String(),
+			"incomplete":     strconv.Itoa(n),
+			"completed":      strconv.Itoa(completed),
+			"ratio":          strconv.FormatFloat(ratio, 'f', 2, 64),
+			"top_dst_port":   strconv.Itoa(int(ent.topTag())),
+			"distinct_ports": strconv.Itoa(ports),
+			"window":         span.Round(time.Millisecond).String(),
 		}
 	}
 	return key, details, true
@@ -81,6 +97,7 @@ func (d *synFlood) observe(ev hsEvent) (netip.Addr, func() map[string]string, bo
 
 func (d *synFlood) clear() {
 	d.inc.clear()
+	d.ports.clear()
 	if d.comp != nil {
 		d.comp.clear()
 	}

@@ -1,0 +1,6 @@
+{
+  "description": "The arp_multi_ip traffic from a proxy-ARP router: the gateway's MAC answers for 20 addresses of the remote subnet 10.20.0.0/24. A pass rule for replies from that subnet (the fix suggested in rules.conf) suppresses multi_ip; without it the same traffic fires 1000805 as in arp_multi_ip.",
+  "extra_rules": ["pass arp 10.20.0.0/24 any -> any any (msg:\"proxy ARP router\"; arp_op:reply; sid:1900001;)"],
+  "alerts": [],
+  "absent_sids": [1000801, 1000802, 1000803, 1000804, 1000805, 1000806, 1000807]
+}

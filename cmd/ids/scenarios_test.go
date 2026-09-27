@@ -25,6 +25,9 @@ type scenarioSpec struct {
 	// Rules is a rules file relative to the scenario directory. Empty
 	// means the repo's rules.conf.
 	Rules string `json:"rules"`
+	// ExtraRules are lines (arpbind directives, pass rules, ...) appended
+	// to the rules file for this scenario only.
+	ExtraRules []string `json:"extra_rules"`
 	// Args are extra "ids run" flags, e.g. ["-whitelist", "10.0.0.0/8"].
 	Args []string `json:"args"`
 	// Alerts must each match exactly one logged alert record.
@@ -113,17 +116,75 @@ func or(s, def string) string {
 // scenarioGenerators write each scenario's pcap at test time. A scenario
 // with a checked-in capture.pcap needs no generator.
 var scenarioGenerators = map[string]func(w *pcapgen.Writer){
-	"syn_flood_single_source":   genSYNFloodSingleSource,
-	"syn_flood_spoofed":         genSYNFloodSpoofed,
-	"completed_handshakes_busy": genCompletedHandshakesBusy,
-	"whitelisted_flood":         genSYNFloodSingleSource, // same traffic, the attacker is whitelisted
-	"dns_axfr":                  genDNSAXFR,
-	"dns_malformed_loop":        genDNSMalformedLoop,
-	"http_basic_auth":           genHTTPBasicAuth,
-	"http_double_encoding":      genHTTPDoubleEncoding,
-	"ftp_bruteforce":            genFTPBruteforce,
-	"ftp_plaintext_pass":        genFTPPlaintextPass,
-	"benign_mixed":              genBenignMixed,
+	"syn_flood_single_source":      genSYNFloodSingleSource,
+	"syn_flood_spoofed":            genSYNFloodSpoofed,
+	"completed_handshakes_busy":    genCompletedHandshakesBusy,
+	"whitelisted_flood":            genSYNFloodSingleSource, // same traffic, the attacker is whitelisted
+	"dns_axfr":                     genDNSAXFR,
+	"dns_malformed_loop":           genDNSMalformedLoop,
+	"http_basic_auth":              genHTTPBasicAuth,
+	"http_double_encoding":         genHTTPDoubleEncoding,
+	"ftp_bruteforce":               genFTPBruteforce,
+	"ftp_plaintext_pass":           genFTPPlaintextPass,
+	"benign_mixed":                 genBenignMixed,
+	"vertical_syn_scan":            genVerticalSYNScan,
+	"fin_scan":                     genFlagScan("F"),
+	"null_scan":                    genFlagScan(""),
+	"xmas_scan":                    genFlagScan("FPU"),
+	"synfin_packet":                genSYNFINPacket,
+	"udp_scan":                     genUDPScan,
+	"horizontal_sweep_port22":      genHorizontalSweep22,
+	"ping_sweep":                   genPingSweep,
+	"scan_is_not_flood":            genScanIsNotFlood,
+	"flood_is_not_scan":            genFloodIsNotScan,
+	"browsing_many_hosts":          genBrowsingManyHosts,
+	"ids_started_mid_connection":   genIDSStartedMidConnection,
+	"land_attack":                  genLandAttack,
+	"land_ip_only":                 genLandIPOnly,
+	"smurf_broadcast_mac":          genSmurfBroadcastMAC,
+	"smurf_limited_broadcast":      genSmurfLimitedBroadcast,
+	"ipv6_multicast_ping":          genIPv6MulticastPing,
+	"traceroute":                   genTraceroute,
+	"ttl_spoofed_source":           genTTLSpoofedSource,
+	"ttl_nat_mixed_os":             genTTLNATMixedOS,
+	"ttl_route_change_single":      genTTLRouteChangeSingle,
+	"teardrop_overlap":             genTeardropOverlap,
+	"fragment_exact_duplicate":     genFragmentExactDuplicate,
+	"tiny_first_fragment":          genTinyFirstFragment,
+	"tiny_ipv6_first_fragment":     genTinyIPv6FirstFragment,
+	"ping_of_death":                genPingOfDeath,
+	"fragment_flood":               genFragmentFlood,
+	"legit_large_ping":             genLegitLargePing,
+	"wsl_dns_proxy_loopback":       genWSLDNSProxyLoopback,
+	"ttl_lb_completed_connections": genTTLLoadBalancedConns,
+	"arp_normal_lan":               genARPNormalLAN,
+	"arp_probe_zero_sender":        genARPProbeZeroSender,
+	"arp_dhcp_reassign":            genARPDHCPReassign,
+	"arp_static_violation":         genARPStaticViolation,
+	"arp_flip_flop":                genARPFlipFlop,
+	"arp_unsolicited_replies":      genARPUnsolicitedReplies,
+	"arp_multi_ip":                 genARPMultiIP("10.1.1", pcapgen.MAC(attackerMAC)),
+	"arp_proxy_router_passed":      genARPMultiIP("10.20.0", pcapgen.MAC(1)),
+	"arp_eth_mismatch":             genARPEthMismatch,
+	"arp_invalid_sender_mac":       genARPInvalidSenderMAC,
+	"udp_flood_single_source":      genUDPFloodSingleSource,
+	"udp_flood_spoofed":            genUDPFloodSpoofed,
+	"udp_flood_bytes":              genUDPFloodBytes,
+	"quic_download":                genQUICDownload,
+	"voip_call":                    genVoIPCall,
+	"udp_flood_to_closed_port":     genUDPFloodToClosedPort,
+	"icmp_echo_flood":              genICMPEchoFlood,
+	"icmp_monitoring_pings":        genICMPMonitoringPings,
+	"smurf_victim":                 genSmurfVictim,
+	"normal_ping_replies":          genNormalPingReplies,
+	"icmp_error_flood":             genICMPErrorFlood,
+	"icmp_tunnel_varied_sizes":     genICMPTunnelVariedSizes,
+	"icmp_tunnel_high_entropy":     genICMPTunnelHighEntropy,
+	"linux_ping_standard":          genLinuxPingStandard,
+	"windows_ping_standard":        genWindowsPingStandard,
+	"large_standard_ping":          genLargeStandardPing,
+	"reflection_ntp_ssdp":          genReflectionNTPSSDP,
+	"mld_from_unspecified":         genMLDFromUnspecified,
 }
 
 func TestScenarios(t *testing.T) {
@@ -179,6 +240,17 @@ func runScenario(t *testing.T, name string) {
 	rulesFile := rulesPath(t)
 	if spec.Rules != "" {
 		rulesFile = filepath.Join(dir, spec.Rules)
+	}
+	if len(spec.ExtraRules) > 0 {
+		base, err := os.ReadFile(rulesFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rulesFile = filepath.Join(t.TempDir(), "rules.conf")
+		text := string(base) + "\n# extra_rules from expected.json\n" + strings.Join(spec.ExtraRules, "\n") + "\n"
+		if err := os.WriteFile(rulesFile, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	logPath := filepath.Join(t.TempDir(), "ids.jsonl")

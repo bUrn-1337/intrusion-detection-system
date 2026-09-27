@@ -634,6 +634,12 @@ func checkInvariants(t *testing.T, p *packet.ParsedPacket, orig []byte) {
 	if p.IPFragmented != (p.MoreFragments || p.FragOffset > 0) {
 		t.Errorf("IPFragmented = %v, MoreFragments = %v, FragOffset = %d", p.IPFragmented, p.MoreFragments, p.FragOffset)
 	}
+	if !p.IPFragmented && p.FragPayloadLen != 0 {
+		t.Errorf("unfragmented packet has FragPayloadLen %d", p.FragPayloadLen)
+	}
+	if p.FragPayloadLen > p.IPTotalLen {
+		t.Errorf("FragPayloadLen %d > IPTotalLen %d", p.FragPayloadLen, p.IPTotalLen)
+	}
 	if p.FragOffset > 0 && p.L4Offset != -1 {
 		t.Errorf("non-first fragment has L4Offset %d", p.L4Offset)
 	}

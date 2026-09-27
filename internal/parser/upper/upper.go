@@ -50,6 +50,8 @@ const (
 	tcpMinHeaderLen = 20
 	udpHeaderLen    = 8
 	icmpHeaderLen   = 4
+	// icmpEchoHeaderLen adds the echo Identifier and Sequence Number.
+	icmpEchoHeaderLen = 8
 
 	// groThreshold is the largest IPTotalLen treated as a single on-wire
 	// packet. Anything larger is assumed to be a GRO/TSO merge (or a BIG
@@ -236,6 +238,16 @@ func parseICMP(p *packet.ParsedPacket, seg []byte) {
 	}
 	// ICMPv6 includes the IPv6 pseudo-header; ICMPv4 covers the message only.
 	p.L4ChecksumStatus = checksumStatus(p, protoICMPv6, seg, isV6)
+	if IsEcho(seg[0], isV6) && len(seg) >= icmpEchoHeaderLen {
+		p.ICMPEchoID = binary.BigEndian.Uint16(seg[4:6])
+		p.ICMPEchoSeq = binary.BigEndian.Uint16(seg[6:8])
+		p.HasICMPEcho = true
+		p.PayloadOffset = p.L4Offset + icmpEchoHeaderLen
+	}
+	if in, ok := ParseICMPInner(seg, isV6); ok {
+		p.ICMPInnerSrc, p.ICMPInnerDst, p.ICMPInnerProto = in.Src, in.Dst, in.Proto
+		p.ICMPInnerSrcPort, p.ICMPInnerDstPort, p.ICMPInnerHasPorts = in.SrcPort, in.DstPort, in.HasPorts
+	}
 }
 
 // layerName returns the error prefix for p's transport protocol.

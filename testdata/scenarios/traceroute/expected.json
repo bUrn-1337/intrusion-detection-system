@@ -1,0 +1,8 @@
+{
+  "description": "traceroute from 10.0.0.5 to 8.8.8.8: UDP probes with TTL 1-8, three per hop. Seven hops answer Time Exceeded (21 messages), the target answers port unreachable. The traceroute rule counts Time Exceeded by destination (the tracer) and fires on the 5th within 10s, then summarizes the other 16. The TTL-1 probes come from HOME_NET, so the low-TTL rule is quiet; three port unreachables are far from a port scan.",
+  "alerts": [
+    {"sid": 1000408, "kind": "alert", "dst_ip": "10.0.0.5", "count": [1, 1], "details": {"track": "by_dst", "tracked_addr": "10.0.0.5", "count": "5"}},
+    {"sid": 1000408, "kind": "summary", "dst_ip": "10.0.0.5", "count": [17, 17]}
+  ],
+  "absent_sids": [1000409, 1000401, 1000601]
+}

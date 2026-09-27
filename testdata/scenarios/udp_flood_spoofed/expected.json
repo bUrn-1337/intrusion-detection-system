@@ -1,0 +1,9 @@
+{
+  "description": "12000 UDP datagrams to 192.0.2.10:80 in 3s, each from its own spoofed source in 198.18.0.0/15. The by_dst rule fires with 100+ sources; no single source sends enough for the by_src rule.",
+  "alerts": [
+    {"sid": 1000010, "kind": "alert", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"detector": "udp_flood", "track": "by_dst", "tracked_addr": "192.0.2.10", "packets": "10000", "replies": "0", "top_dst_port": "80", "distinct_sources": "100+"}},
+    {"sid": 1000010, "kind": "summary", "dst_ip": "192.0.2.10", "count": [2001, 2001]}
+  ],
+  "absent_sids": [1000011, 1000012, 1000013]
+}

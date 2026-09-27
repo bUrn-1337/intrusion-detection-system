@@ -1,0 +1,8 @@
+{
+  "description": "The gateway 10.1.1.1 is pinned with arpbind; it answers five hosts normally, then the attacker sends one reply claiming 10.1.1.1. static_violation fires on that first packet. Static bindings take precedence, so there is no mac_change.",
+  "extra_rules": ["arpbind 10.1.1.1 02:00:00:00:00:01"],
+  "alerts": [
+    {"sid": 1000801, "kind": "alert", "src_ip": "10.1.1.1", "dst_ip": "10.1.1.10", "count": [1, 1], "details": {"claimed_mac": "02:00:00:00:00:66", "bound_mac": "02:00:00:00:00:01", "op": "reply"}}
+  ],
+  "absent_sids": [1000802, 1000803, 1000805, 1000806, 1000807]
+}

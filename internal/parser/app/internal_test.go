@@ -2,9 +2,10 @@ package app
 
 import (
 	"errors"
-	"math"
 	"strings"
 	"testing"
+
+	"github.com/bUrn-1337/intrusion-detection-system/internal/entropy"
 )
 
 // chainMsg returns a message whose bytes at 0 are a root label and whose
@@ -84,28 +85,12 @@ func TestNameString(t *testing.T) {
 	}
 }
 
-func TestShannonEntropy(t *testing.T) {
-	tests := []struct {
-		in   string
-		want float64
-	}{
-		{"", 0},
-		{"aaaaaaaa", 0},
-		{"ab", 1},
-		{"abcd", 2},
-		{"abcdefghijklmnop", 4},
-		{"aab", -(2.0/3*math.Log2(2.0/3) + 1.0/3*math.Log2(1.0/3))},
-	}
-	for _, tt := range tests {
-		if got := shannonEntropy([]byte(tt.in)); math.Abs(got-tt.want) > 1e-9 {
-			t.Errorf("shannonEntropy(%q) = %v, want %v", tt.in, got, tt.want)
-		}
-	}
+func TestLabelEntropyThreshold(t *testing.T) {
 	// Tunnel-style labels score above the threshold; long ordinary ones
 	// below it.
 	for _, s := range []string{"nbswy3dpeb3w64tmmqqgc3tqmfzxg4dxn5zgs3tomv2gs5dv", "4f6b1c9e2a7d3f8b0c5e1a9d7f2b6c3e8a0d4f1b"} {
-		if h := shannonEntropy([]byte(s)); h <= suspiciousLabelEntropy {
-			t.Errorf("shannonEntropy(%q) = %.2f, want > %v", s, h, suspiciousLabelEntropy)
+		if h := entropy.Shannon([]byte(s)); h <= suspiciousLabelEntropy {
+			t.Errorf("Shannon(%q) = %.2f, want > %v", s, h, suspiciousLabelEntropy)
 		}
 	}
 	// Low-diversity labels stay below it. Note that 40+ character labels
@@ -113,8 +98,8 @@ func TestShannonEntropy(t *testing.T) {
 	// "www-downloads-mirror-server-eu-west-1-cdn"), so at 3.5 the rule is
 	// a weak signal on its own.
 	for _, s := range []string{strings.Repeat("ab", 30), "aaaaaaaaaabbbbbbbbbbccccccccccdddddddddd-e"} {
-		if h := shannonEntropy([]byte(s)); h > suspiciousLabelEntropy {
-			t.Errorf("shannonEntropy(%q) = %.2f, want <= %v", s, h, suspiciousLabelEntropy)
+		if h := entropy.Shannon([]byte(s)); h > suspiciousLabelEntropy {
+			t.Errorf("Shannon(%q) = %.2f, want <= %v", s, h, suspiciousLabelEntropy)
 		}
 	}
 }

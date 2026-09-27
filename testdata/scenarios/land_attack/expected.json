@@ -1,0 +1,10 @@
+{
+  "description": "Three land SYNs: 192.0.2.10:139 to 192.0.2.10:139, among a normal HTTP connection. The TCP land rule and the weaker same-address rule both fire once and summarize the three; the normal connection alerts nothing.",
+  "alerts": [
+    {"sid": 1000003, "kind": "alert", "src_ip": "192.0.2.10", "dst_ip": "192.0.2.10", "src_port": 139, "dst_port": 139, "count": [1, 1]},
+    {"sid": 1000003, "kind": "summary", "src_ip": "192.0.2.10", "count": [3, 3]},
+    {"sid": 1000004, "kind": "alert", "src_ip": "192.0.2.10", "dst_ip": "192.0.2.10", "count": [1, 1]},
+    {"sid": 1000004, "kind": "summary", "src_ip": "192.0.2.10", "count": [3, 3]}
+  ],
+  "absent_sids": [1000001, 1000002, 1000401]
+}

@@ -100,6 +100,11 @@ func TestParseMatchesGopacket(t *testing.T) {
 		{OptionType: 0x1e, OptionData: []byte{1, 2, 3, 4}},
 	}}
 	hbh.HopByHop.NextHeader = layers.IPProtocolUDP
+	hbhFrag := oIPv6(layers.IPProtocolIPv6HopByHop)
+	hbhFrag.HopByHop = &layers.IPv6HopByHop{Options: []*layers.IPv6HopByHopOption{
+		{OptionType: 0x1e, OptionData: []byte{1, 2, 3, 4}},
+	}}
+	hbhFrag.HopByHop.NextHeader = layers.IPProtocolIPv6Fragment
 
 	tests := []struct {
 		name   string
@@ -120,6 +125,8 @@ func TestParseMatchesGopacket(t *testing.T) {
 		{"ipv6 hop-by-hop udp", []gopacket.SerializableLayer{oEth(layers.EthernetTypeIPv6), hbh, oUDP(), oPayload("hbh")}},
 		{"ipv6 fragment", []gopacket.SerializableLayer{oEth(layers.EthernetTypeIPv6), oIPv6(layers.IPProtocolIPv6Fragment),
 			&layers.IPv6Fragment{NextHeader: layers.IPProtocolUDP, FragmentOffset: 181, Identification: 0x01020304}, oPayload("fragment tail")}},
+		{"ipv6 hop-by-hop first fragment", []gopacket.SerializableLayer{oEth(layers.EthernetTypeIPv6), hbhFrag,
+			&layers.IPv6Fragment{NextHeader: layers.IPProtocolUDP, MoreFragments: true, Identification: 7}, oUDP(), oPayload("first part")}},
 		{"802.1Q ipv6 udp", []gopacket.SerializableLayer{oEth(layers.EthernetTypeDot1Q),
 			&layers.Dot1Q{VLANIdentifier: 7, Type: layers.EthernetTypeIPv6}, oIPv6(layers.IPProtocolUDP), oUDP(), oPayload("v6 in vlan")}},
 		{"arp request", []gopacket.SerializableLayer{oEth(layers.EthernetTypeARP), arpLayer(layers.ARPRequest)}},
@@ -174,6 +181,11 @@ func TestParseMatchesGopacket(t *testing.T) {
 				eq(t, "IPID", p.IPID, uint32(ip.Id))
 				eq(t, "MoreFragments", p.MoreFragments, ip.Flags&layers.IPv4MoreFragments != 0)
 				eq(t, "FragOffset", p.FragOffset, ip.FragOffset*8)
+				wantFrag := uint32(0)
+				if ip.FragOffset > 0 || ip.Flags&layers.IPv4MoreFragments != 0 {
+					wantFrag = uint32(ip.Length) - uint32(ip.IHL)*4
+				}
+				eq(t, "FragPayloadLen", p.FragPayloadLen, wantFrag)
 				eq(t, "IPChecksumValid", p.IPChecksumValid, true)
 				// gopacket trims the IPv4 payload to Total Length, so its end
 				// is where the IP packet ends.
@@ -203,6 +215,15 @@ func TestParseMatchesGopacket(t *testing.T) {
 					eq(t, "IPID", p.IPID, f.Identification)
 					eq(t, "FragOffset", p.FragOffset, f.FragmentOffset*8)
 					eq(t, "MoreFragments", p.MoreFragments, f.MoreFragments)
+					if f.FragmentOffset > 0 || f.MoreFragments {
+						// gopacket's fragment payload is what follows the
+						// Fragment header, up to the IPv6 payload length.
+						eq(t, "FragPayloadLen", p.FragPayloadLen, uint32(len(f.LayerPayload())))
+					}
+					if f.FragmentOffset == 0 {
+						// gopacket stops at fragments; the header is still here.
+						wantL4 = offsetIn(data, f.LayerPayload())
+					}
 				}
 				eq(t, "IPProto", p.IPProto, uint8(final))
 				eq(t, "L4Offset", p.L4Offset, wantL4)

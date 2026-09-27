@@ -20,8 +20,14 @@ import (
 // wall-clock time, so a fixed start keeps runs reproducible.
 var T0 = time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 
-// Pkt describes one frame. Proto is "tcp", "udp" or "icmp" (echo request;
-// ICMPv6 for IPv6 addresses). Flags are TCP flag letters from "SAFRPU".
+// Pkt describes one frame. Proto is "tcp", "udp" or "icmp" (ICMPv6 for
+// IPv6 addresses). An "icmp" Pkt is an Echo Request, or with Unreach set
+// a port unreachable (ICMPv4 3/3, ICMPv6 1/4) quoting the IP header and
+// first 8 transport bytes of *Unreach; Payload is then ignored. ICMP sets
+// any other type and code (the 4 bytes after the checksum are zero unless
+// it is an echo). An echo request or reply (ICMP 8/0, ICMPv6 128/129)
+// carries the identifier and sequence number in Echo, default 1 and 1,
+// followed by Payload. Flags are TCP flag letters from "SAFRPU".
 type Pkt struct {
 	Proto        string
 	Src, Dst     string
@@ -29,7 +35,20 @@ type Pkt struct {
 	Flags        string
 	Seq, Ack     uint32
 	Payload      []byte
+	Unreach      *Pkt
+	ICMP         *[2]uint8        // ICMP type and code
+	Echo         *[2]uint16       // echo identifier and sequence number; nil means 1, 1
+	TTL          uint8            // IPv4 TTL or IPv6 hop limit; 0 means 64
+	EthDst       net.HardwareAddr // nil means 02:00:00:00:00:02
+	EthSrc       net.HardwareAddr // nil means 02:00:00:00:00:01
 }
+
+// Broadcast is the Ethernet broadcast address, for Pkt.EthDst.
+var Broadcast = net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+
+// ZeroMAC is the all-zero address Linux puts on loopback frames, for
+// Pkt.EthSrc and Pkt.EthDst.
+var ZeroMAC = net.HardwareAddr{0, 0, 0, 0, 0, 0}
 
 // Bytes serializes the frame with correct lengths and checksums.
 func (p Pkt) Bytes(tb testing.TB) []byte {
@@ -39,6 +58,16 @@ func (p Pkt) Bytes(tb testing.TB) []byte {
 		tb.Fatalf("pcapgen: bad address in %+v", p)
 	}
 	eth := &layers.Ethernet{SrcMAC: net.HardwareAddr{2, 0, 0, 0, 0, 1}, DstMAC: net.HardwareAddr{2, 0, 0, 0, 0, 2}}
+	if p.EthDst != nil {
+		eth.DstMAC = p.EthDst
+	}
+	if p.EthSrc != nil {
+		eth.SrcMAC = p.EthSrc
+	}
+	ttl := p.TTL
+	if ttl == 0 {
+		ttl = 64
+	}
 	v6 := src.To4() == nil
 	var ipProto layers.IPProtocol
 	switch p.Proto {
@@ -58,11 +87,11 @@ func (p Pkt) Bytes(tb testing.TB) []byte {
 	var l3 gopacket.SerializableLayer
 	if v6 {
 		eth.EthernetType = layers.EthernetTypeIPv6
-		ip6 := &layers.IPv6{Version: 6, HopLimit: 64, NextHeader: ipProto, SrcIP: src, DstIP: dst}
+		ip6 := &layers.IPv6{Version: 6, HopLimit: ttl, NextHeader: ipProto, SrcIP: src, DstIP: dst}
 		ip, l3 = ip6, ip6
 	} else {
 		eth.EthernetType = layers.EthernetTypeIPv4
-		ip4 := &layers.IPv4{Version: 4, TTL: 64, Flags: layers.IPv4DontFragment, Protocol: ipProto, SrcIP: src.To4(), DstIP: dst.To4()}
+		ip4 := &layers.IPv4{Version: 4, TTL: ttl, Flags: layers.IPv4DontFragment, Protocol: ipProto, SrcIP: src.To4(), DstIP: dst.To4()}
 		ip, l3 = ip4, ip4
 	}
 	ls := []gopacket.SerializableLayer{eth, l3}
@@ -98,14 +127,49 @@ func (p Pkt) Bytes(tb testing.TB) []byte {
 		}
 		ls = append(ls, udp)
 	case "icmp":
+		v6Type := layers.CreateICMPv6TypeCode(layers.ICMPv6TypeEchoRequest, 0)
+		echo := [2]uint16{1, 1}
+		if p.Echo != nil {
+			echo = *p.Echo
+		}
+		isEcho := true
+		v4 := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0), Id: echo[0], Seq: echo[1]}
+		if p.Unreach != nil {
+			isEcho = false
+			v6Type = layers.CreateICMPv6TypeCode(layers.ICMPv6TypeDestinationUnreachable, layers.ICMPv6CodePortUnreachable)
+			v4 = &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeDestinationUnreachable, layers.ICMPv4CodePort)}
+			inner := p.Unreach.Bytes(tb)[14:] // strip Ethernet
+			hdr := 40
+			if !v6 {
+				hdr = int(inner[0]&0x0f) * 4
+			}
+			quote := inner[:min(len(inner), hdr+8)]
+			if v6 {
+				quote = append(make([]byte, 4), quote...) // the ICMPv6 layer has no unused field
+			}
+			p.Payload = quote
+		} else if p.ICMP != nil {
+			v6Type = layers.CreateICMPv6TypeCode(p.ICMP[0], p.ICMP[1])
+			v4 = &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(p.ICMP[0], p.ICMP[1])}
+			isEcho = v6 && (p.ICMP[0] == 128 || p.ICMP[0] == 129) || !v6 && (p.ICMP[0] == 8 || p.ICMP[0] == 0)
+			switch {
+			case isEcho && !v6:
+				v4.Id, v4.Seq = echo[0], echo[1]
+			case !isEcho && v6:
+				p.Payload = append(make([]byte, 4), p.Payload...) // unused field
+			}
+		}
+		if isEcho && v6 { // the ICMPv6 layer has no identifier or sequence fields
+			p.Payload = append([]byte{byte(echo[0] >> 8), byte(echo[0]), byte(echo[1] >> 8), byte(echo[1])}, p.Payload...)
+		}
 		if v6 {
-			icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(layers.ICMPv6TypeEchoRequest, 0)}
+			icmp := &layers.ICMPv6{TypeCode: v6Type}
 			if err := icmp.SetNetworkLayerForChecksum(ip); err != nil {
 				tb.Fatal(err)
 			}
 			ls = append(ls, icmp)
 		} else {
-			ls = append(ls, &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0), Id: 1, Seq: 1})
+			ls = append(ls, v4)
 		}
 	}
 	if len(p.Payload) > 0 {
@@ -118,6 +182,99 @@ func (p Pkt) Bytes(tb testing.TB) []byte {
 	return append([]byte(nil), buf.Bytes()...)
 }
 
+// Frag describes one IP fragment. Data is the fragment's part of the
+// original IP payload (the first fragment's starts with the transport
+// header); Offset is in bytes, a multiple of 8. IPv4 fragments get a valid
+// header checksum; IPv6 fragments one Fragment header whose Next Header is
+// Proto.
+type Frag struct {
+	Src, Dst string
+	ID       uint32
+	Proto    uint8
+	Offset   int
+	MF       bool
+	Data     []byte
+	TTL      uint8 // 0 means 64
+}
+
+// Bytes builds the frame.
+func (f Frag) Bytes(tb testing.TB) []byte {
+	tb.Helper()
+	src, dst := net.ParseIP(f.Src), net.ParseIP(f.Dst)
+	if src == nil || dst == nil || f.Offset%8 != 0 || f.Offset > 0xfff8 {
+		tb.Fatalf("pcapgen: bad fragment %+v", f)
+	}
+	ttl := f.TTL
+	if ttl == 0 {
+		ttl = 64
+	}
+	eth := []byte{2, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 1, 0x08, 0x00}
+	if s4 := src.To4(); s4 != nil {
+		h := make([]byte, 20)
+		h[0] = 0x45
+		binary.BigEndian.PutUint16(h[2:], uint16(20+len(f.Data)))
+		binary.BigEndian.PutUint16(h[4:], uint16(f.ID))
+		ff := uint16(f.Offset / 8)
+		if f.MF {
+			ff |= 0x2000
+		}
+		binary.BigEndian.PutUint16(h[6:], ff)
+		h[8], h[9] = ttl, f.Proto
+		copy(h[12:], s4)
+		copy(h[16:], dst.To4())
+		var sum uint32
+		for i := 0; i < 20; i += 2 {
+			sum += uint32(binary.BigEndian.Uint16(h[i:]))
+		}
+		for sum > 0xffff {
+			sum = sum&0xffff + sum>>16
+		}
+		binary.BigEndian.PutUint16(h[10:], ^uint16(sum))
+		return append(append(eth, h...), f.Data...)
+	}
+	eth[12], eth[13] = 0x86, 0xdd
+	h := make([]byte, 48)
+	h[0] = 0x60
+	binary.BigEndian.PutUint16(h[4:], uint16(8+len(f.Data)))
+	h[6], h[7] = 44, ttl
+	copy(h[8:], src.To16())
+	copy(h[24:], dst.To16())
+	h[40] = f.Proto
+	ff := uint16(f.Offset)
+	if f.MF {
+		ff |= 1
+	}
+	binary.BigEndian.PutUint16(h[42:], ff)
+	binary.BigEndian.PutUint32(h[44:], f.ID)
+	return append(append(eth, h...), f.Data...)
+}
+
+// Fragment splits p the way a sender with link MTU mtu does: p is
+// serialized with correct checksums, and its IP payload is cut into
+// fragments whose IP packets fit in mtu bytes.
+func Fragment(tb testing.TB, p Pkt, id uint32, mtu int) []Frag {
+	tb.Helper()
+	b := p.Bytes(tb)[14:]
+	hdr, proto, room, end := 20, b[9], mtu-20, int(binary.BigEndian.Uint16(b[2:]))
+	if b[0]>>4 == 6 {
+		hdr, proto, room, end = 40, b[6], mtu-48, 40+int(binary.BigEndian.Uint16(b[4:]))
+	}
+	payload := b[hdr:end] // without Ethernet padding
+	room &^= 7
+	var out []Frag
+	for off := 0; off < len(payload); off += room {
+		end := min(off+room, len(payload))
+		out = append(out, Frag{Src: p.Src, Dst: p.Dst, ID: id, Proto: proto, Offset: off, MF: end < len(payload), Data: payload[off:end], TTL: p.TTL})
+	}
+	return out
+}
+
+// AddFrag writes one fragment.
+func (w *Writer) AddFrag(f Frag) {
+	w.tb.Helper()
+	w.Frame(f.Bytes(w.tb))
+}
+
 // Writer writes frames to a pcap file. Now is the timestamp of the next
 // frame; Add and the Conn helpers advance it by Step after each frame.
 type Writer struct {
@@ -126,6 +283,9 @@ type Writer struct {
 	w    *pcapgo.Writer
 	Now  time.Time
 	Step time.Duration
+	// Snap, if positive, captures at most Snap bytes of each frame (as
+	// tcpdump -s does); the record keeps the frame's full length.
+	Snap int
 }
 
 // Create starts an Ethernet pcap file with a 262144-byte snaplen.
@@ -146,7 +306,11 @@ func Create(tb testing.TB, path string) *Writer {
 // Frame writes raw frame bytes at w.Now, then advances w.Now by w.Step.
 func (w *Writer) Frame(b []byte) {
 	w.tb.Helper()
-	if err := w.w.WritePacket(gopacket.CaptureInfo{Timestamp: w.Now, CaptureLength: len(b), Length: len(b)}, b); err != nil {
+	n := len(b)
+	if w.Snap > 0 && len(b) > w.Snap {
+		b = b[:w.Snap]
+	}
+	if err := w.w.WritePacket(gopacket.CaptureInfo{Timestamp: w.Now, CaptureLength: len(b), Length: n}, b); err != nil {
 		w.tb.Fatal(err)
 	}
 	w.Now = w.Now.Add(w.Step)
@@ -170,11 +334,13 @@ func (w *Writer) Close() {
 }
 
 // Conn is a TCP connection with correct sequence numbers in both
-// directions.
+// directions. ServerTTL, if set, is the TTL of every packet the server
+// sends (0 means 64).
 type Conn struct {
 	w              *Writer
 	Client, Server string
 	CPort, SPort   uint16
+	ServerTTL      uint8
 	cseq, sseq     uint32
 }
 
@@ -193,13 +359,13 @@ func (c *Conn) SYN() {
 // Refuse writes the server's RST/ACK answer to a SYN.
 func (c *Conn) Refuse() {
 	c.w.tb.Helper()
-	c.w.Add(Pkt{Proto: "tcp", Src: c.Server, Dst: c.Client, Sport: c.SPort, Dport: c.CPort, Flags: "RA", Ack: c.cseq + 1})
+	c.w.Add(Pkt{Proto: "tcp", Src: c.Server, Dst: c.Client, Sport: c.SPort, Dport: c.CPort, TTL: c.ServerTTL, Flags: "RA", Ack: c.cseq + 1})
 }
 
 // SYNACK writes the server's SYN/ACK answer to a SYN.
 func (c *Conn) SYNACK() {
 	c.w.tb.Helper()
-	c.w.Add(Pkt{Proto: "tcp", Src: c.Server, Dst: c.Client, Sport: c.SPort, Dport: c.CPort, Flags: "SA", Seq: c.sseq, Ack: c.cseq + 1})
+	c.w.Add(Pkt{Proto: "tcp", Src: c.Server, Dst: c.Client, Sport: c.SPort, Dport: c.CPort, TTL: c.ServerTTL, Flags: "SA", Seq: c.sseq, Ack: c.cseq + 1})
 }
 
 // Handshake writes SYN, SYN/ACK, ACK.
@@ -219,10 +385,10 @@ func (c *Conn) Send(fromClient bool, payload []byte) {
 	if fromClient {
 		c.w.Add(Pkt{Proto: "tcp", Src: c.Client, Dst: c.Server, Sport: c.CPort, Dport: c.SPort, Flags: "PA", Seq: c.cseq, Ack: c.sseq, Payload: payload})
 		c.cseq += uint32(len(payload))
-		c.w.Add(Pkt{Proto: "tcp", Src: c.Server, Dst: c.Client, Sport: c.SPort, Dport: c.CPort, Flags: "A", Seq: c.sseq, Ack: c.cseq})
+		c.w.Add(Pkt{Proto: "tcp", Src: c.Server, Dst: c.Client, Sport: c.SPort, Dport: c.CPort, TTL: c.ServerTTL, Flags: "A", Seq: c.sseq, Ack: c.cseq})
 		return
 	}
-	c.w.Add(Pkt{Proto: "tcp", Src: c.Server, Dst: c.Client, Sport: c.SPort, Dport: c.CPort, Flags: "PA", Seq: c.sseq, Ack: c.cseq, Payload: payload})
+	c.w.Add(Pkt{Proto: "tcp", Src: c.Server, Dst: c.Client, Sport: c.SPort, Dport: c.CPort, TTL: c.ServerTTL, Flags: "PA", Seq: c.sseq, Ack: c.cseq, Payload: payload})
 	c.sseq += uint32(len(payload))
 	c.w.Add(Pkt{Proto: "tcp", Src: c.Client, Dst: c.Server, Sport: c.CPort, Dport: c.SPort, Flags: "A", Seq: c.cseq, Ack: c.sseq})
 }
@@ -232,7 +398,7 @@ func (c *Conn) Close() {
 	c.w.tb.Helper()
 	c.w.Add(Pkt{Proto: "tcp", Src: c.Client, Dst: c.Server, Sport: c.CPort, Dport: c.SPort, Flags: "FA", Seq: c.cseq, Ack: c.sseq})
 	c.cseq++
-	c.w.Add(Pkt{Proto: "tcp", Src: c.Server, Dst: c.Client, Sport: c.SPort, Dport: c.CPort, Flags: "FA", Seq: c.sseq, Ack: c.cseq})
+	c.w.Add(Pkt{Proto: "tcp", Src: c.Server, Dst: c.Client, Sport: c.SPort, Dport: c.CPort, TTL: c.ServerTTL, Flags: "FA", Seq: c.sseq, Ack: c.cseq})
 	c.sseq++
 	c.w.Add(Pkt{Proto: "tcp", Src: c.Client, Dst: c.Server, Sport: c.CPort, Dport: c.SPort, Flags: "A", Seq: c.cseq, Ack: c.sseq})
 }
@@ -309,4 +475,67 @@ func TLSClientHello(sni string) []byte {
 	rec := []byte{22, 3, 1}
 	rec = binary.BigEndian.AppendUint16(rec, uint16(len(hs)))
 	return append(rec, hs...)
+}
+
+// ARP describes one Ethernet/IPv4 ARP frame. Op is 1 (request) or 2
+// (reply). Unset MACs take the usual values: EthSrc is SenderMAC; for a
+// request EthDst is broadcast and TargetMAC zero, for a reply EthDst is
+// TargetMAC.
+type ARP struct {
+	Op                   uint16
+	SenderIP, TargetIP   string
+	SenderMAC, TargetMAC net.HardwareAddr
+	EthSrc, EthDst       net.HardwareAddr
+}
+
+// ARP operations.
+const (
+	ARPRequest = 1
+	ARPReply   = 2
+)
+
+// Bytes serializes the frame.
+func (a ARP) Bytes(tb testing.TB) []byte {
+	tb.Helper()
+	sip, tip := net.ParseIP(a.SenderIP).To4(), net.ParseIP(a.TargetIP).To4()
+	if sip == nil || tip == nil || len(a.SenderMAC) != 6 {
+		tb.Fatalf("pcapgen: bad ARP %+v", a)
+	}
+	tha, esrc, edst := a.TargetMAC, a.EthSrc, a.EthDst
+	if tha == nil {
+		tha = ZeroMAC
+		if a.Op == ARPReply {
+			tb.Fatalf("pcapgen: ARP reply without TargetMAC: %+v", a)
+		}
+	}
+	if esrc == nil {
+		esrc = a.SenderMAC
+	}
+	if edst == nil {
+		edst = Broadcast
+		if a.Op == ARPReply {
+			edst = tha
+		}
+	}
+	buf := gopacket.NewSerializeBuffer()
+	err := gopacket.SerializeLayers(buf, gopacket.SerializeOptions{FixLengths: true},
+		&layers.Ethernet{SrcMAC: esrc, DstMAC: edst, EthernetType: layers.EthernetTypeARP},
+		&layers.ARP{AddrType: layers.LinkTypeEthernet, Protocol: layers.EthernetTypeIPv4, HwAddressSize: 6, ProtAddressSize: 4,
+			Operation: a.Op, SourceHwAddress: a.SenderMAC, SourceProtAddress: sip, DstHwAddress: tha, DstProtAddress: tip})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return append([]byte(nil), buf.Bytes()...)
+}
+
+// AddARP serializes and writes a.
+func (w *Writer) AddARP(a ARP) {
+	w.tb.Helper()
+	w.Frame(a.Bytes(w.tb))
+}
+
+// MAC returns the locally administered address 02:00:00:00:hi:lo, for
+// hosts numbered n in generated captures.
+func MAC(n uint16) net.HardwareAddr {
+	return net.HardwareAddr{2, 0, 0, 0, byte(n >> 8), byte(n)}
 }

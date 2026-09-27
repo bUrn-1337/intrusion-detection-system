@@ -1,0 +1,4 @@
+{
+  "description": "Windows ping from 10.0.0.7 with -l 32, 500, 1472 and 0: the abcdefghijklmnopqrstuvw pattern in four sizes. Nothing fires; 1472 bytes still fit one Ethernet frame.",
+  "alerts": []
+}

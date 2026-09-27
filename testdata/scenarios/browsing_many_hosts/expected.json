@@ -1,0 +1,5 @@
+{
+  "description": "A client looks up and opens HTTPS connections to 40 different servers on port 443 in 8s, all completing. Completed handshakes are not probes: no host_sweep or port_scan.",
+  "alerts": [],
+  "absent_sids": [1000401, 1000402, 1000403]
+}

@@ -4,10 +4,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 
+	"github.com/bUrn-1337/intrusion-detection-system/internal/entropy"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
 )
 
@@ -196,7 +196,7 @@ func checkQName(r *result, labels [][]byte) {
 		r.flag(reasonLongQName)
 	}
 	if len(labels) > 0 && len(labels[0]) > suspiciousLabelLen &&
-		shannonEntropy(lowerASCII(labels[0])) > suspiciousLabelEntropy {
+		entropy.Shannon(lowerASCII(labels[0])) > suspiciousLabelEntropy {
 		r.flag(reasonHighEntropyLabel)
 	}
 }
@@ -293,27 +293,4 @@ func lowerASCII(b []byte) []byte {
 		out[i] = c
 	}
 	return out
-}
-
-// shannonEntropy returns the Shannon entropy of b in bits per byte: 0 for
-// a repeated byte, up to 8 for uniformly random bytes. Random base32 or
-// hex labels, typical of DNS tunnels, score 4 or more; ordinary
-// hostnames score about 2.5 to 3.5.
-func shannonEntropy(b []byte) float64 {
-	if len(b) == 0 {
-		return 0
-	}
-	var counts [256]int
-	for _, c := range b {
-		counts[c]++
-	}
-	var h float64
-	n := float64(len(b))
-	for _, c := range counts {
-		if c > 0 {
-			p := float64(c) / n
-			h -= p * math.Log2(p)
-		}
-	}
-	return h
 }

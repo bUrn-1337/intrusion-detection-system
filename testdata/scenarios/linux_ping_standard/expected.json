@@ -1,0 +1,4 @@
+{
+  "description": "Linux ping from 10.0.0.5 with -s 56, 100, 1000, 8 and 4, and ping -6 -s 200: many sizes, all standard counting payloads (after a 16-byte timestamp when there is room). Nothing fires.",
+  "alerts": []
+}

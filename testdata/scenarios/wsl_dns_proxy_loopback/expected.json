@@ -1,0 +1,5 @@
+{
+  "description": "The WSL2 DNS proxy as seen on lo: 20 lookups where 10.255.255.254 sends queries and answers to itself, plus one TCP SYN from 10.255.255.254:53 to itself. Every frame is a loopback frame (all-zero MACs), so neither land rule fires (eth_dst:!zero). land_attack still fires on the same packets with real MACs.",
+  "alerts": [],
+  "absent_sids": [1000003, 1000004]
+}

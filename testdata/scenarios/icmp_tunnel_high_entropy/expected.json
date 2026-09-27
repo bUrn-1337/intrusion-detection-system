@@ -1,0 +1,8 @@
+{
+  "description": "An encrypted ICMP tunnel between 10.0.0.5 and 198.51.100.21 padding every payload to 1024 random-looking bytes: one size, about 7.8 bits of entropy per byte. The tunnel rule fires at the 10th payload.",
+  "alerts": [
+    {"sid": 1000901, "kind": "alert", "src_ip": "198.51.100.21", "dst_ip": "10.0.0.5", "count": [1, 1],
+     "details": {"detector": "icmp_tunnel", "client": "10.0.0.5", "server": "198.51.100.21", "payloads": "10", "distinct_sizes": "1", "avg_entropy": "7.80", "payload_len": "1024"}},
+    {"sid": 1000901, "kind": "summary", "src_ip": "198.51.100.21", "count": [21, 21]}
+  ]
+}

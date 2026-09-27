@@ -155,6 +155,15 @@ type ParsedPacket struct {
 	// (MoreFragments || FragOffset > 0). Module 3 should not expect a
 	// complete L4 header in non-first fragments.
 	IPFragmented bool
+	// FragPayloadLen is the number of bytes this fragment carries of the
+	// original packet's fragmentable part, taken from the length fields
+	// (not from what was captured): for IPv4, IPTotalLen minus the header
+	// length; for IPv6, the bytes after the Fragment header (IPTotalLen
+	// minus the fixed header and every extension header up to and
+	// including the Fragment header). The fragment covers bytes
+	// [FragOffset, FragOffset+FragPayloadLen) of the original packet. It
+	// is 0 when IPFragmented is false.
+	FragPayloadLen uint32
 
 	// ARPOp is the ARP opcode, normally ARPRequest or ARPReply, or 0 if the
 	// packet is not ARP. Any other opcode is stored as-is and Module 2 also
@@ -177,7 +186,8 @@ type ParsedPacket struct {
 	L4Proto string
 	// PayloadOffset is the byte offset in RawData where the application
 	// payload starts, after the TCP header and options or the UDP or ICMP
-	// header. It is -1 if not determined. Read the payload through
+	// header (8 bytes for an echo request or reply, else 4; see
+	// HasICMPEcho). It is -1 if not determined. Read the payload through
 	// Payload(), not by slicing RawData directly.
 	PayloadOffset int
 	// SrcPort is the TCP or UDP source port. It is 0 for other protocols.
@@ -205,6 +215,38 @@ type ParsedPacket struct {
 	// ICMPCode is the ICMP (or ICMPv6) code. It is only meaningful when
 	// L4Proto is L4ICMP.
 	ICMPCode uint8
+	// ICMPEchoID and ICMPEchoSeq are the Identifier and Sequence Number
+	// of an echo request or reply (ICMP type 8 or 0, ICMPv6 type 128 or
+	// 129) whose 8-byte echo header was captured. They are 0 for every
+	// other message; HasICMPEcho tells a real id or seq of 0 apart.
+	ICMPEchoID  uint16
+	ICMPEchoSeq uint16
+	// HasICMPEcho is true when ICMPEchoID and ICMPEchoSeq were set. For
+	// such a message PayloadOffset is past the id and seq, so Payload()
+	// is the echo data (what ping -s sizes); for every other ICMP message
+	// it starts right after the 4-byte type, code and checksum.
+	HasICMPEcho bool
+	// ICMPInnerSrc and ICMPInnerDst are the addresses of the packet quoted
+	// by an ICMP or ICMPv6 error message (Destination Unreachable, Time
+	// Exceeded, Parameter Problem, Redirect, Source Quench, Packet Too
+	// Big): the packet that caused the error, as its sender sent it. For a
+	// port unreachable, ICMPInnerSrc is the host that sent the probe and is
+	// normally the outer IPDst. Both are nil when the message is not an
+	// error or its quoted IP header could not be decoded (truncated, wrong
+	// IP version, broken IPv6 extension headers); that is not a parse
+	// error. ICMPInnerSrc != nil means every ICMPInner* field below is set.
+	ICMPInnerSrc net.IP
+	ICMPInnerDst net.IP
+	// ICMPInnerProto is the quoted IPv4 protocol, or for IPv6 the Next
+	// Header after any extension headers (6=TCP, 17=UDP).
+	ICMPInnerProto uint8
+	// ICMPInnerSrcPort and ICMPInnerDstPort are the quoted TCP or UDP
+	// ports, valid only when ICMPInnerHasPorts is true: the quoted protocol
+	// is TCP or UDP, it is not a non-first fragment, and the quote includes
+	// at least the first 4 bytes of the transport header.
+	ICMPInnerSrcPort  uint16
+	ICMPInnerDstPort  uint16
+	ICMPInnerHasPorts bool
 	// L4ChecksumStatus is the result of verifying the TCP, UDP, ICMPv4 or
 	// ICMPv6 checksum: L4ChecksumUnchecked, L4ChecksumValid or
 	// L4ChecksumInvalid. TCP, UDP and ICMPv6 include the IP pseudo-header;

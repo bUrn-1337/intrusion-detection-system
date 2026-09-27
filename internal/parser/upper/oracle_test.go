@@ -183,10 +183,17 @@ func TestParseMatchesGopacket(t *testing.T) {
 				eq(t, "L4Offset", p.L4Offset, l4)
 				eq(t, "ICMPType", p.ICMPType, ic.TypeCode.Type())
 				eq(t, "ICMPCode", p.ICMPCode, ic.TypeCode.Code())
-				eq(t, "PayloadOffset", p.PayloadOffset, l4+4)
-				// gopacket's ICMPv4 layer includes id/seq; ours starts after
-				// the 4-byte common header.
-				eq(t, "Payload", string(p.Payload()), string(data[l4+4:ipEnd]))
+				// gopacket's ICMPv4 layer always takes 8 bytes (id/seq, or
+				// the unused word of an error); ours takes 8 only for echo.
+				off := l4 + 4
+				if typ := ic.TypeCode.Type(); typ == 0 || typ == 8 {
+					off = offsetIn(data, ic.LayerPayload())
+					eq(t, "ICMPEchoID", p.ICMPEchoID, ic.Id)
+					eq(t, "ICMPEchoSeq", p.ICMPEchoSeq, ic.Seq)
+				}
+				eq(t, "HasICMPEcho", p.HasICMPEcho, off != l4+4)
+				eq(t, "PayloadOffset", p.PayloadOffset, off)
+				eq(t, "Payload", string(p.Payload()), string(data[off:ipEnd]))
 
 			case g.Layer(layers.LayerTypeICMPv6) != nil:
 				ic := g.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
@@ -195,8 +202,18 @@ func TestParseMatchesGopacket(t *testing.T) {
 				eq(t, "L4Offset", p.L4Offset, l4)
 				eq(t, "ICMPType", p.ICMPType, ic.TypeCode.Type())
 				eq(t, "ICMPCode", p.ICMPCode, ic.TypeCode.Code())
-				eq(t, "PayloadOffset", p.PayloadOffset, offsetIn(data, ic.LayerPayload()))
-				eq(t, "Payload", string(p.Payload()), string(ic.LayerPayload()))
+				pl := ic.LayerPayload()
+				echo, isEcho := g.Layer(layers.LayerTypeICMPv6Echo).(*layers.ICMPv6Echo)
+				if isEcho {
+					// gopacket's echo layer does not expose the data, so
+					// take it from the ICMPv6 payload after id and seq.
+					pl = pl[4:]
+					eq(t, "ICMPEchoID", p.ICMPEchoID, echo.Identifier)
+					eq(t, "ICMPEchoSeq", p.ICMPEchoSeq, echo.SeqNumber)
+				}
+				eq(t, "HasICMPEcho", p.HasICMPEcho, isEcho)
+				eq(t, "PayloadOffset", p.PayloadOffset, offsetIn(data, pl))
+				eq(t, "Payload", string(p.Payload()), string(pl))
 
 			default:
 				t.Fatalf("gopacket found no transport layer in %v", g)
