@@ -1,0 +1,5 @@
+{
+  "description": "20 clients open 600 HTTPS connections to one server in about 4s, all completing, plus 120 refused connections to a closed port: over the flood count, but the incomplete ratio is only 0.17. Busy but healthy: no alerts.",
+  "alerts": [],
+  "absent_sids": [1000001, 1000002]
+}

@@ -1,0 +1,4 @@
+{
+  "description": "About a minute of ordinary client traffic: 60 DNS lookups, HTTP (with a single-encoded %25 in a query string) and HTTPS browsing, IPv4 and IPv6 pings, TLS over IPv6, and NTP. No alerts.",
+  "alerts": []
+}

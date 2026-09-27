@@ -15,6 +15,23 @@
 //
 // Live capture uses libpcap through cgo, so building this package requires
 // the libpcap development headers (libpcap-dev on Debian/Ubuntu).
+//
+// # Kernel ring and immediate mode
+//
+// Live capture runs with immediate mode off and a 32 MB kernel buffer.
+// On Linux, immediate mode makes libpcap fall back from TPACKET_V3 to
+// TPACKET_V2, whose ring has fixed-size slots, each big enough for a
+// snaplen-sized frame (capped at the interface MTU). With the 262144-byte
+// snaplen that GRO frames need, an 8 MB ring held only about 127 frames of
+// any size, and a short scheduling stall during an 800-frame SYN burst
+// overflowed it (kernel drops, measured in the soak test). TPACKET_V3
+// packs frames by their real size into blocks, so the same memory holds
+// tens of thousands of small packets.
+//
+// The cost is batching: a block is handed to us when it fills or when the
+// 100 ms read timeout expires, so on a quiet link a packet can reach the
+// dashboard up to about 100 ms late. Detection is not affected, because the
+// rule engine's clock is the packet's capture timestamp, not arrival time.
 package capture
 
 import (
@@ -42,10 +59,14 @@ const (
 
 const (
 	// liveBufferSize is the kernel capture buffer for live interfaces.
-	liveBufferSize = 8 << 20
+	liveBufferSize = 32 << 20
+	// liveImmediateMode must stay false: immediate mode forces fixed-size,
+	// snaplen-sized ring slots and drops bursts. See the package doc and
+	// TestImmediateModeStaysOff before changing it.
+	liveImmediateMode = false
 	// readTimeout bounds how long a live read blocks when no traffic
-	// arrives, so the capture loop can notice context cancellation.
-	// Immediate mode means it adds no latency when packets are flowing.
+	// arrives, so the capture loop can notice context cancellation. It is
+	// also the longest a partly filled ring block waits before delivery.
 	readTimeout = 100 * time.Millisecond
 	// statsInterval is how often the capture loop refreshes kernel drop
 	// counters on a live handle.
@@ -112,6 +133,7 @@ type Stats struct {
 type Capturer struct {
 	handle *pcap.Handle
 	live   bool
+	file   string // the pcap file, when not live
 	out    chan *packet.ParsedPacket
 
 	// dropWhenFull selects the full-queue policy: drop (live) or wait
@@ -167,6 +189,7 @@ func New(cfg Config) (*Capturer, error) {
 	return &Capturer{
 		handle:       h,
 		live:         live,
+		file:         cfg.PcapFile,
 		out:          make(chan *packet.ParsedPacket, cfg.QueueSize),
 		dropWhenFull: live,
 	}, nil
@@ -214,7 +237,7 @@ func openLive(cfg Config) (*pcap.Handle, error) {
 		{"snaplen", func() error { return inactive.SetSnapLen(cfg.Snaplen) }},
 		{"promiscuous mode", func() error { return inactive.SetPromisc(cfg.Promisc) }},
 		{"read timeout", func() error { return inactive.SetTimeout(readTimeout) }},
-		{"immediate mode", func() error { return inactive.SetImmediateMode(true) }},
+		{"immediate mode", func() error { return inactive.SetImmediateMode(liveImmediateMode) }},
 		{"buffer size", func() error { return inactive.SetBufferSize(liveBufferSize) }},
 	}
 	for _, s := range settings {
@@ -345,7 +368,7 @@ func (c *Capturer) run(ctx context.Context) {
 			return
 		default:
 			if ctx.Err() == nil {
-				c.setErr(fmt.Errorf("capture: read failed: %w", err))
+				c.setErr(c.readError(err))
 			}
 			return
 		}
@@ -383,6 +406,20 @@ func (c *Capturer) send(ctx context.Context, p *packet.ParsedPacket) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// readError describes a failed read. For a file, libpcap's own message
+// (such as "truncated dump file; tried to read 60 captured bytes, only got
+// 13") says what is wrong, where gopacket only says "Read Error".
+func (c *Capturer) readError(err error) error {
+	if !c.live && errors.Is(err, pcap.NextErrorReadError) {
+		detail := err.Error()
+		if herr := c.handle.Error(); herr != nil && herr.Error() != "" {
+			detail = herr.Error()
+		}
+		return fmt.Errorf("capture: pcap file %q is damaged after %d frames: %s", c.file, c.captured.Load(), detail)
+	}
+	return fmt.Errorf("capture: read failed: %w", err)
 }
 
 // refreshKernelStats must only be called from the capture goroutine: pcap

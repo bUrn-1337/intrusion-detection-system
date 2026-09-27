@@ -1,0 +1,11 @@
+{
+  "description": "203.0.113.5 sends 300 SYNs to a closed port on 192.0.2.10 in 1.2s, all refused. Both SYN flood rules fire once, then summarize.",
+  "alerts": [
+    {"sid": 1000001, "kind": "alert", "src_ip": "203.0.113.5", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"track": "by_dst", "tracked_addr": "192.0.2.10", "top_dst_port": "8081", "completed": "0"}},
+    {"sid": 1000001, "kind": "summary", "dst_ip": "192.0.2.10", "count": [150, 300]},
+    {"sid": 1000002, "kind": "alert", "src_ip": "203.0.113.5", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"track": "by_src", "tracked_addr": "203.0.113.5"}},
+    {"sid": 1000002, "kind": "summary", "src_ip": "203.0.113.5", "count": [150, 300]}
+  ]
+}

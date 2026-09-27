@@ -102,7 +102,7 @@ func TestMatch(t *testing.T) {
 		{"app_field A is not AXFR", "alert udp any any -> any 53 (msg:\"m\"; app_field:qtype_name=AXFR;", pkt{proto: "udp", src: c, dst: s, sport: 5353, dport: 53, payload: dnsQuery("example.com", 1)}, false},
 		{"app_reason malformed", "alert udp any any -> any any (msg:\"m\"; app_reason:malformed;", pkt{proto: "udp", src: c, dst: s, sport: 5353, dport: 53, payload: "short"}, true},
 		{"app_reason absent", "alert udp any any -> any any (msg:\"m\"; app_reason:malformed;", pkt{proto: "udp", src: c, dst: s, sport: 5353, dport: 53, payload: dnsQuery("example.com", 1)}, false},
-		{"app_reason suspicious", "alert tcp any any -> any any (msg:\"m\"; app_reason:suspicious;", tcp(c, s, 1, 80, "PA", "GET /a%252e HTTP/1.1\r\nHost: x\r\n\r\n"), true},
+		{"app_reason suspicious", "alert tcp any any -> any any (msg:\"m\"; app_reason:suspicious;", tcp(c, s, 1, 80, "PA", "GET /a/%252e%252e%252fb HTTP/1.1\r\nHost: x\r\n\r\n"), true},
 		// Protocols.
 		{"ip rule on udp", "alert ip 10.0.0.1 any -> any any (msg:\"m\";", pkt{proto: "udp", src: c, dst: s, sport: 1, dport: 2}, true},
 		{"ip rule on icmp", "alert ip any any -> 10.0.0.2 any (msg:\"m\";", pkt{proto: "icmp", src: c, dst: s}, true},

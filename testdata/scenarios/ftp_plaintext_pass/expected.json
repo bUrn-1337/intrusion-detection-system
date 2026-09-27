@@ -1,0 +1,8 @@
+{
+  "description": "One successful FTP login (USER/PASS/230) and logout. The cleartext password alerts once; with no 530s the brute-force rule stays quiet. The password must not be logged.",
+  "alerts": [
+    {"sid": 1000301, "kind": "alert", "src_ip": "10.0.0.8", "dst_ip": "192.0.2.21", "dst_port": 21, "count": [1, 1]}
+  ],
+  "absent_sids": [1000302],
+  "log_must_not_contain": ["s3cretPw!"]
+}

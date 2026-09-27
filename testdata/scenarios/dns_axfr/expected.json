@@ -1,0 +1,6 @@
+{
+  "description": "A client requests a zone transfer (AXFR) over TCP, next to two ordinary UDP lookups. The refused response is not an alert.",
+  "alerts": [
+    {"sid": 1000101, "kind": "alert", "src_ip": "10.0.0.5", "dst_ip": "192.0.2.53", "dst_port": 53, "count": [1, 1]}
+  ]
+}

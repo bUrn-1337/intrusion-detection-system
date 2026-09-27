@@ -143,14 +143,6 @@ func with(m map[string]string, kv ...string) map[string]string {
 	return out
 }
 
-func without(m map[string]string, keys ...string) map[string]string {
-	out := maps.Clone(m)
-	for _, k := range keys {
-		delete(out, k)
-	}
-	return out
-}
-
 // dnsWant is the field set of a well-formed message with one question.
 func dnsWant(msg string, id int, resp bool, rcode, qd, an int, qname string, qtype int, qtypeName string) map[string]string {
 	m := fields(
@@ -298,6 +290,26 @@ func appCases() []appCase {
 			want: dnsHeaderWant(axfr, 99, false, 1)},
 		{name: "dns over tcp continuation segment", frame: tcp4(53, 40000, "\x00\x05\x00\x01\x00\x00\x0e\x10\x00\x04\x5d\xb8\xd8\x22"),
 			proto: packet.AppUnknown},
+		// Segments split at arbitrary points, as seen in real captures
+		// (tcpdump's dns_tcp.pcap, chrissanders' dns_axfr.pcapng). The
+		// first two bytes are not a length, so none of them is DNS.
+		{name: "dns over tcp: length prefix alone", frame: tcp4(40000, 53, tcpDNS(axfr)[:2]), proto: packet.AppUnknown},
+		{name: "dns over tcp: message without its prefix", frame: tcp4(40000, 53, q), proto: packet.AppUnknown},
+		{name: "dns over tcp: prefix split 1+1, second byte then message", frame: tcp4(53, 40000, tcpDNS(resp)[1:]),
+			proto: packet.AppUnknown},
+		{name: "dns over tcp: query then first prefix byte of the next", frame: tcp4(40000, 53, tcpDNS(q)+"\x00"),
+			proto: packet.AppDNS, want: dnsWant(q, 0x1234, false, 0, 1, 0, "google.com", 1, "A")},
+		{name: "dns over tcp: query then the start of the next message", frame: tcp4(40000, 53, tcpDNS(q)+tcpDNS(axfr)[:20]),
+			proto: packet.AppDNS, want: dnsWant(q, 0x1234, false, 0, 1, 0, "google.com", 1, "A")},
+		{name: "dns over tcp: bytes after the message are not a message", frame: tcp4(40000, 53, tcpDNS(q)+"\x00\x05hello"),
+			proto: packet.AppUnknown},
+		// A malformed message is reported only when its prefix matches
+		// the segment; the start of a longer one could be misaligned.
+		{name: "dns over tcp self compression pointer", frame: tcp4(40000, 53, tcpDNS(selfPtr)), proto: packet.AppDNS,
+			want: with(dnsHeaderWant(selfPtr, 8, false, 1), "malformed_reason", "qname: compression loop: pointer does not point backwards"),
+			errs: []string{"dns: qname: compression loop"}},
+		{name: "dns over tcp self compression pointer, longer message claimed",
+			frame: tcp4(40000, 53, string(u16(uint16(len(selfPtr)+40)))+selfPtr), proto: packet.AppUnknown},
 		{name: "dns ANY query", frame: udp4(40000, 53, anyQ), proto: packet.AppDNS,
 			want: dnsWant(anyQ, 100, false, 0, 1, 0, "example.com", 255, "ANY")},
 		{name: "dns unnamed qtype", frame: udp4(40000, 53, query(16, "example.com", 99)), proto: packet.AppDNS,
@@ -366,6 +378,10 @@ func appCases() []appCase {
 			proto: packet.AppHTTP,
 			want: fields("method", "GET", "uri", "/a/%252e%252e/%252e%252e/etc/passwd", "uri_decoded", "/a/%2e%2e/%2e%2e/etc/passwd",
 				"version", "1.1", "request_complete", "true", "suspicious_reason", "double percent-encoding")},
+		{name: "http double percent-encoding without traversal", frame: tcp4(40000, 80, "GET /t?u=http%253A%252F%252Fa.example%252F%253Fx%253D1 HTTP/1.1\r\n\r\n"),
+			proto: packet.AppHTTP,
+			want: fields("method", "GET", "uri", "/t?u=http%253A%252F%252Fa.example%252F%253Fx%253D1", "uri_decoded", "/t?u=http%3A%2F%2Fa.example%2F%3Fx%3D1",
+				"version", "1.1", "request_complete", "true")},
 		{name: "http basic auth", frame: tcp4(40000, 80, "GET /admin HTTP/1.1\r\nHost: h\r\nAuthorization: Basic "+basicCred+"\r\n\r\n"),
 			proto: packet.AppHTTP,
 			want: fields("method", "GET", "uri", "/admin", "uri_decoded", "/admin", "version", "1.1", "host", "h",

@@ -234,6 +234,14 @@ func TestRunErrors(t *testing.T) {
 	pcap := synFloodPcap(t, 1)
 	bad := filepath.Join(dir, "bad.conf")
 	os.WriteFile(bad, []byte("# comment\nalert tcp any any -> any any (msg:\"x\"; sid:1;)\nalert tcp any any -> any any (msg:\"y\"; sid:1;)\nalert bogus\nalert tcp any any -> any any (msg:\"z\"; sid:3; nosuch:1;)\n"), 0o600)
+	unreadable := filepath.Join(dir, "unreadable.conf")
+	os.WriteFile(unreadable, []byte("# nothing\n"), 0o000)
+	roDir := filepath.Join(dir, "ro")
+	os.Mkdir(roDir, 0o555)
+	if f, err := os.Create(filepath.Join(roDir, "probe")); err == nil {
+		f.Close()
+		t.Skip("running with permission overrides (root?); permission cases would not fail")
+	}
 	tests := []struct {
 		name string
 		args []string
@@ -246,6 +254,10 @@ func TestRunErrors(t *testing.T) {
 		{"bad rules", []string{"-r", pcap, "-rules", bad}, 1, []string{"bad rules", "bad.conf:3", "bad.conf:4", "bad.conf:5"}},
 		{"missing pcap", []string{"-r", filepath.Join(dir, "none.pcap"), "-rules", rulesPath(t)}, 1, []string{"capture:", "none.pcap"}},
 		{"bad interface", []string{"-i", "nosuchif0", "-rules", rulesPath(t)}, 1, []string{"capture:"}},
+		{"unreadable rules", []string{"-r", pcap, "-rules", unreadable}, 1, []string{"unreadable.conf is not readable: permission denied"}},
+		{"log dir missing", []string{"-r", pcap, "-rules", rulesPath(t), "-log", filepath.Join(dir, "nodir", "a.jsonl")}, 1, []string{"cannot create alert log", "nodir does not exist"}},
+		{"log unwritable", []string{"-r", pcap, "-rules", rulesPath(t), "-log", filepath.Join(roDir, "a.jsonl")}, 1, []string{"cannot open alert log", "permission denied"}},
+		{"log is a directory", []string{"-r", pcap, "-rules", rulesPath(t), "-log", dir}, 1, []string{"cannot open alert log", "is a directory"}},
 		{"bad size", []string{"-r", pcap, "-log-max-size", "lots"}, 2, []string{"bad size"}},
 		{"bad whitelist", []string{"-r", pcap, "-whitelist", "10.0.0.0/8,nope"}, 2, []string{"bad whitelist"}},
 		{"unknown subcommand", []string{"frobnicate"}, 2, []string{"unknown subcommand"}},
@@ -253,12 +265,24 @@ func TestRunErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			args := tc.args
+			logPath := filepath.Join(dir, "x.jsonl")
 			if tc.name != "unknown subcommand" {
-				args = append(append([]string{"run"}, tc.args...), "-log", filepath.Join(dir, "x.jsonl"))
+				// A -log in tc.args comes later and wins.
+				args = append([]string{"run", "-log", logPath}, tc.args...)
 			}
-			code, _, stderr := runIDSTest(t, args...)
+			code, stdout, stderr := runIDSTest(t, args...)
 			if code != tc.code {
 				t.Errorf("exit %d, want %d; stderr:\n%s", code, tc.code, stderr)
+			}
+			// Nothing started: no alerts, no stats, no log file.
+			if stdout != "" {
+				t.Errorf("stdout %q", stdout)
+			}
+			if _, err := os.Stat(logPath); err == nil {
+				t.Errorf("log file %s was created", logPath)
+			}
+			if strings.Count(strings.TrimSpace(stderr), "\n") > 0 && tc.name != "bad rules" && tc.code == 1 {
+				t.Errorf("want a one-line error, got:\n%s", stderr)
 			}
 			for _, w := range tc.want {
 				if !strings.Contains(stderr, w) {

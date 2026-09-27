@@ -1,0 +1,118 @@
+package main
+
+import (
+	"encoding/binary"
+	"io"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/gopacket/gopacket/pcapgo"
+
+	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/app"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/lower"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/upper"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/rules"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/testutil/pcapgen"
+)
+
+// Fuzz input format: a sequence of records, each a 2-byte big-endian
+// header followed by a frame. The header's low 11 bits are the frame
+// length (cut to what is left); the top 5 bits advance the packet clock by
+// that many 100ms steps, so inputs can cross dedup and flood windows.
+const fuzzLenMask = 1<<11 - 1
+
+func encodeFuzzFrames(frames [][]byte, step uint16) []byte {
+	var out []byte
+	for _, f := range frames {
+		if len(f) > fuzzLenMask {
+			f = f[:fuzzLenMask]
+		}
+		out = binary.BigEndian.AppendUint16(out, step<<11|uint16(len(f)))
+		out = append(out, f...)
+	}
+	return out
+}
+
+// FuzzPipeline feeds arbitrary frames through lower -> upper -> app ->
+// engine with the default rules, as the ids pipeline does. It checks that
+// nothing panics and that every alert is well formed.
+func FuzzPipeline(f *testing.F) {
+	rs, err := rules.Load("../../rules.conf")
+	if err != nil {
+		f.Fatal(err)
+	}
+	// Seeds: every scenario's traffic, a few frames per seed.
+	for name, gen := range scenarioGenerators {
+		path := filepath.Join(f.TempDir(), name+".pcap")
+		w := pcapgen.Create(f, path)
+		gen(w)
+		w.Close()
+		frames := readFrames(f, path)
+		for i := 0; i < len(frames); i += 16 {
+			f.Add(encodeFuzzFrames(frames[i:min(i+16, len(frames))], 0))
+			if i > 64 {
+				break
+			}
+		}
+	}
+	f.Add([]byte{})
+	f.Add([]byte{0xff, 0xff})
+
+	sids := make(map[int]bool)
+	for _, r := range rs.Rules() {
+		sids[r.SID] = true
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		e := rules.NewEngine(rs, rules.EngineConfig{MaxKeys: 64})
+		now := pcapgen.T0
+		check := func(as []rules.Alert) {
+			for _, a := range as {
+				if !sids[a.SID] || a.Count < 1 || (a.Kind != rules.KindAlert && a.Kind != rules.KindSummary) {
+					t.Fatalf("bad alert %+v", a)
+				}
+			}
+		}
+		for len(data) >= 2 {
+			h := binary.BigEndian.Uint16(data)
+			n := min(int(h&fuzzLenMask), len(data)-2)
+			frame := append([]byte(nil), data[2:2+n]...)
+			data = data[2+n:]
+			now = now.Add(time.Duration(h>>11) * 100 * time.Millisecond)
+
+			p := packet.NewParsedPacket(now, uint32(len(frame)), uint32(len(frame)))
+			p.RawData = frame
+			lower.Parse(p)
+			upper.Parse(p)
+			app.Parse(p)
+			check(e.Process(p))
+		}
+		check(e.Flush())
+	})
+}
+
+func readFrames(tb testing.TB, path string) [][]byte {
+	tb.Helper()
+	fh, err := os.Open(path)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	defer fh.Close()
+	r, err := pcapgo.NewReader(fh)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	var out [][]byte
+	for {
+		b, _, err := r.ReadPacketData()
+		if err == io.EOF {
+			return out
+		}
+		if err != nil {
+			tb.Fatal(err)
+		}
+		out = append(out, b)
+	}
+}
