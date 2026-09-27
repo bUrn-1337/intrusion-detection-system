@@ -155,7 +155,7 @@ func parseRequestLine(r *result, line []byte, terminated bool) bool {
 	r.set("uri", uri)
 	decoded := percentDecode(uri)
 	r.set("uri_decoded", decoded)
-	if percentDecode(decoded) != decoded {
+	if hidesTraversal(decoded) {
 		r.flag(reasonDoubleEncodedURI)
 	}
 	if len(parts) == 3 {
@@ -278,6 +278,33 @@ func allDigits(s string) bool {
 		}
 	}
 	return s != ""
+}
+
+// maxExtraDecodes is how many more times hidesTraversal decodes a URI
+// after the first decode, so triple encoding (%25252e) is caught too.
+const maxExtraDecodes = 3
+
+// hidesTraversal reports whether decoding the once-decoded URI again
+// produces a "../", "..\\" or NUL byte that was not already there: the
+// sign of a double-encoded path traversal aimed at a filter that decodes
+// only once. Double encoding on its own is common in benign traffic (ad
+// click trackers and analytics beacons pass encoded URLs in query
+// parameters, e.g. "%253A%252F%252F"), so it is not flagged.
+func hidesTraversal(decoded string) bool {
+	cur := decoded
+	for range maxExtraDecodes {
+		next := percentDecode(cur)
+		if next == cur {
+			return false
+		}
+		for _, t := range []string{"../", "..\\", "\x00"} {
+			if strings.Count(next, t) > strings.Count(decoded, t) {
+				return true
+			}
+		}
+		cur = next
+	}
+	return false
 }
 
 // percentDecode decodes %XX escapes once. Invalid escapes are kept as is;

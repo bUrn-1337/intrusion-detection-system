@@ -1,0 +1,6 @@
+{
+  "description": "The syn_flood_single_source traffic with the attacker's network whitelisted: its handshakes are not counted, so neither flood rule fires.",
+  "args": ["-whitelist", "203.0.113.0/24"],
+  "alerts": [],
+  "absent_sids": [1000001, 1000002]
+}

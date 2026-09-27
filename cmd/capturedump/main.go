@@ -13,10 +13,15 @@
 // file (a file with errors is reported and the old rules are kept). At
 // exit the engine is flushed, so pending dedup summaries are printed.
 //
+// With -w FILE, every captured frame is also written to a pcap file
+// (Ethernet, the capture snaplen, microsecond timestamps), for recording
+// traffic to replay later with ids run -r.
+//
 // Usage:
 //
 //	capturedump -i eth0 [-f "tcp port 80"] [-rules rules.conf [-alerts-only] [-whitelist 10.0.0.0/8,192.168.1.5]]
 //	capturedump -r trace.pcap
+//	capturedump -i eth0 -w trace.pcap > /dev/null
 //
 // Example output:
 //
@@ -29,6 +34,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -38,6 +44,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
+	"github.com/gopacket/gopacket/pcapgo"
 
 	"github.com/bUrn-1337/intrusion-detection-system/internal/capture"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/logging"
@@ -52,6 +62,7 @@ type options struct {
 	rules      string
 	alertsOnly bool
 	whitelist  []netip.Prefix
+	write      string
 }
 
 func main() {
@@ -70,6 +81,7 @@ func main() {
 		opt.whitelist = append(opt.whitelist, wl...)
 		return err
 	})
+	flag.StringVar(&opt.write, "w", "", "also write every captured frame to this pcap `file`")
 	flag.Parse()
 	if opt.rules == "" && (opt.alertsOnly || opt.whitelist != nil) {
 		fmt.Fprintln(os.Stderr, "capturedump: -alerts-only and -whitelist need -rules")
@@ -99,6 +111,13 @@ func run(cfg capture.Config, opt options) error {
 	}
 	defer c.Close()
 
+	var pw *pcapWriter
+	if opt.write != "" {
+		if pw, err = createPcap(opt.write, cfg.Snaplen); err != nil {
+			return err
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -123,6 +142,9 @@ func run(cfg capture.Config, opt options) error {
 	}
 
 	for p := range c.Start(ctx) {
+		if pw != nil {
+			pw.write(p)
+		}
 		lower.Parse(p)
 		upper.Parse(p)
 		app.Parse(p)
@@ -137,6 +159,12 @@ func run(cfg capture.Config, opt options) error {
 	s := c.Stats()
 	fmt.Fprintf(os.Stderr, "captured=%d kernel_dropped=%d queue_dropped=%d queue_depth=%d\n",
 		s.Captured, s.KernelDropped, s.QueueDropped, s.QueueDepth)
+	if pw != nil {
+		if err := pw.close(); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "wrote %d frames to %s\n", pw.n, opt.write)
+	}
 	if e != nil {
 		printAlerts(e.Flush())
 		es := e.Stats()
@@ -144,6 +172,55 @@ func run(cfg capture.Config, opt options) error {
 			es.Rules, es.Packets, es.Alerts, es.Summaries, es.Suppressed, es.Passed, es.Whitelisted, es.Evictions, es.Reloads, es.ReloadFails)
 	}
 	return c.Err()
+}
+
+// pcapWriter writes captured frames to a pcap file. RawData is owned by
+// the packet (capture copies each frame), so it can be written as is.
+type pcapWriter struct {
+	f   *os.File
+	buf *bufio.Writer
+	w   *pcapgo.Writer
+	n   int
+	err error
+}
+
+func createPcap(path string, snaplen int) (*pcapWriter, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("creating pcap file: %w", err)
+	}
+	pw := &pcapWriter{f: f, buf: bufio.NewWriterSize(f, 1<<20)}
+	pw.w = pcapgo.NewWriter(pw.buf)
+	if err := pw.w.WriteFileHeader(uint32(snaplen), layers.LinkTypeEthernet); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("writing pcap file: %w", err)
+	}
+	return pw, nil
+}
+
+func (pw *pcapWriter) write(p *packet.ParsedPacket) {
+	if pw.err != nil {
+		return
+	}
+	ci := gopacket.CaptureInfo{Timestamp: p.Timestamp, CaptureLength: len(p.RawData), Length: int(p.WireLen)}
+	if pw.err = pw.w.WritePacket(ci, p.RawData); pw.err == nil {
+		pw.n++
+	}
+}
+
+// close flushes the file and reports the first write error, if any.
+func (pw *pcapWriter) close() error {
+	err := pw.err
+	if ferr := pw.buf.Flush(); err == nil {
+		err = ferr
+	}
+	if cerr := pw.f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return fmt.Errorf("writing pcap file: %w", err)
+	}
+	return nil
 }
 
 // parseWhitelist parses a comma-separated list of CIDR prefixes and

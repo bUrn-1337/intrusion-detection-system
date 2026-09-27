@@ -172,3 +172,56 @@ func FuzzDNSName(f *testing.F) {
 		}
 	})
 }
+
+// Benign double-encoded URIs, shortened from the 11 requests in the public
+// lotsofweb.pcapng capture that the old "decodes twice" check flagged: ad
+// click trackers, analytics beacons and Google Analytics cookies carry an
+// encoded URL or cookie inside a query parameter.
+var benignDoubleEncoded = []string{
+	"/1413310/ad-336x280.swf?clickTag=http%3A//ad.example.test/click%253Bh%3Dv8/38ed/3/0/%252a/a%253B219492202%253B0-0%253B0",
+	"/1420759/ad-300x250.swf?ct=US&clickTAG=http%3A//ad.example.test/click%253Bh%3Dv8/38ed/f/17a/%252a/v%253B218777608%253B1-0",
+	"/1413310/ad-336x280.swf?clickTag=http%3A//ad.example.test/click%253B%253B%257Eokv%253D%253B%2521category%253D%253Bs%253D8_10006",
+	"/1420759/ad-300x250.swf?clickTAG=http%3A//ad.example.test/click%253B%253B%257Esscs%253D%253fhttp%253A%252F%252Fshop.example.test%252F",
+	"/A09801/b3/0/3/0902121/139683317.js?D=DM_LOC%3Dhttp%253A%252F%252Fwww.example.test%252FWORLD%252F%253Fundefined%253Dundefined%26DM_CAT%3Dnews%2520%253E%2520world",
+	"/A09801/b3/0/3/0902121/934627693.js?D=DM_LOC%3Dhttp%253A%252F%252Fwww.example.test%252F%253Fundefined%253Dundefined%26DM_CAT%3Dnews%2520%253E%2520homepage%26DM_EOM%3D1",
+	"/A09801/b3/0/3/0902121/989450581.js?D=DM_LOC%3Dhttp%253A%252F%252Fwww.example.test%252F%26DM_REF%3Dhttp%253A%252F%252Fwww.example.test%252F%26DM_EOM%3D1&C=A09801",
+	"/__utm.gif?utmwv=4.5.9&utmhn=social.example.test&utmt=var&utmcc=__utma%3D43838368.1980854511.1258909459.1%3B%2B__utmv%3D43838368.Not%2520Logged%2520In%3B",
+	"/__utm.gif?utmwv=4.5.9&utmhn=social.example.test&utmp=%2F&utmcc=__utma%3D43838368.1980854511.1258909459.1%3B%2B__utmz%3D43838368.utmcsr%3D(direct)%7Cutmcmd%3D(none)%3B%2B__utmv%3D43838368.Not%2520Logged%2520In%3B",
+	"/__utm.gif?utmwv=4.5.9&utmhn=social.example.test&utmt=var&utmcc=__utma%3D43838368.1980854511.1258909459.1%3B%2B__utmv%3D43838368.lang%253A%2520en%3B",
+	"/__utm.gif?utmwv=4.5.9&utmn=707020248&utmhn=social.example.test&utmcc=__utmz%3D43838368.utmcsr%3D(direct)%7Cutmccn%3D(direct)%3B%2B__utmv%3D43838368.lang%253A%2520en%3B",
+}
+
+func TestHidesTraversal(t *testing.T) {
+	for _, uri := range benignDoubleEncoded {
+		decoded := percentDecode(uri)
+		if percentDecode(decoded) == decoded {
+			t.Errorf("test URI is not double-encoded, so it tests nothing: %q", uri)
+		}
+		if hidesTraversal(decoded) {
+			t.Errorf("hidesTraversal flags benign %q", uri)
+		}
+	}
+
+	tests := []struct {
+		uri  string
+		want bool
+	}{
+		{"/static/%252e%252e%252f%252e%252e%252fetc%252fpasswd", true},
+		{"/a/%252e%252e/%252e%252e/etc/passwd", true},         // "../" appears after the second decode
+		{"/cgi-bin/%252e%252e%255cwindows%255cwin.ini", true}, // "..\"
+		{"/download?file=report.pdf%2500.php", true},          // NUL
+		{"/%25252e%25252e%25252fetc/passwd", true},            // triple encoding
+		{"/x/../%252e%252e%252fsecret", true},                 // a hidden one next to a plain one
+		{"/x/../y/%252Fz", false},                             // the "../" was already visible
+		{"/a%20b", false},                                     // single encoding
+		{"/search?q=50%25+off", false},                        // an escaped percent sign
+		{"/p?u=http%253A%252F%252Fexample.test%252F", false},  // an encoded URL, no traversal
+		{"/p?v=..%252e", false},                               // decodes to "..." with no separator
+		{"/%252e%252e", false},                                // ".." alone, no separator
+	}
+	for _, tt := range tests {
+		if got := hidesTraversal(percentDecode(tt.uri)); got != tt.want {
+			t.Errorf("hidesTraversal(decode(%q)) = %v, want %v", tt.uri, got, tt.want)
+		}
+	}
+}

@@ -64,35 +64,75 @@ var (
 )
 
 // parseDNS decodes a DNS message. Over TCP the message has a 2-byte length
-// prefix (RFC 1035 4.2.2). It returns nil for a TCP segment that does not
-// start with a plausible prefix and header (for example the continuation
-// of a large response). A UDP datagram on port 53 is always taken as DNS,
-// so garbage sent to a resolver is reported as malformed rather than
+// prefix (RFC 1035 4.2.2). A UDP datagram on port 53 is always taken as
+// DNS, so garbage sent to a resolver is reported as malformed rather than
 // hidden as unknown.
+//
+// Over TCP, parseDNS returns nil (unknown traffic) for a segment that does
+// not frame cleanly as DNS. Without reassembly, a segment boundary can fall
+// anywhere: the prefix can arrive alone, split 1+1 across segments, or a
+// segment can be the continuation of a large response. The first two bytes
+// of such a segment are then not a length at all. A segment frames cleanly
+// when it starts with a plausible prefix and header and either
+//   - holds exactly the message, or several messages whose prefixes are all
+//     plausible (the last one may be cut short), or
+//   - holds the start of a longer message whose header and questions
+//     decode without error as far as the segment goes.
+//
+// So a malformed message is reported only when its length prefix matches
+// the segment. A malformed first segment of a longer message is missed; it
+// cannot be told from a misaligned one without reassembly.
 func parseDNS(payload []byte, isTCP bool) *result {
-	msg := payload
-	complete := true // the whole message is in this segment
-	dnsLen := len(payload)
-	if isTCP {
-		if len(payload) < 2+dnsHeaderLen {
-			return nil
-		}
-		dnsLen = int(binary.BigEndian.Uint16(payload))
-		if dnsLen < dnsHeaderLen {
-			return nil
-		}
-		opcode := payload[2+2] >> 3 & 0x0F
-		if opcode == dnsOpcodeUnassigned || opcode > dnsOpcodeMax {
-			return nil
-		}
-		msg = payload[2:]
-		if len(msg) > dnsLen {
-			msg = msg[:dnsLen]
-		} else if len(msg) < dnsLen {
-			complete = false
-		}
+	if !isTCP {
+		return decodeDNS(payload, len(payload), true)
 	}
+	if len(payload) < 2+dnsHeaderLen {
+		return nil
+	}
+	dnsLen := int(binary.BigEndian.Uint16(payload))
+	if dnsLen < dnsHeaderLen {
+		return nil
+	}
+	opcode := payload[2+2] >> 3 & 0x0F
+	if opcode == dnsOpcodeUnassigned || opcode > dnsOpcodeMax {
+		return nil
+	}
+	msg := payload[2:]
+	if len(msg) > dnsLen {
+		if !plausibleFrames(msg[dnsLen:]) {
+			return nil
+		}
+		msg = msg[:dnsLen]
+	}
+	complete := len(msg) == dnsLen
+	r := decodeDNS(msg, dnsLen, complete)
+	if !complete && len(r.malformed) > 0 {
+		return nil
+	}
+	return r
+}
 
+// plausibleFrames reports whether rest, the bytes after the first message
+// of a TCP segment, is a run of length-prefixed messages of at least a
+// header each. The last message, or the last prefix byte, may be cut short.
+func plausibleFrames(rest []byte) bool {
+	for len(rest) >= 2 {
+		n := int(binary.BigEndian.Uint16(rest))
+		if n < dnsHeaderLen {
+			return false
+		}
+		if len(rest) < 2+n {
+			return true
+		}
+		rest = rest[2+n:]
+	}
+	return true
+}
+
+// decodeDNS decodes one unprefixed message. dnsLen is its declared length,
+// and complete says whether all of it is in msg; a name or question cut off
+// by the end of an incomplete message is not malformed.
+func decodeDNS(msg []byte, dnsLen int, complete bool) *result {
 	r := &result{proto: packet.AppDNS}
 	r.set("dns_len", strconv.Itoa(dnsLen))
 	if len(msg) < dnsHeaderLen {

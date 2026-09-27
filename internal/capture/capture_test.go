@@ -554,3 +554,29 @@ func TestMissingPcapFile(t *testing.T) {
 		t.Fatal("New succeeded on a missing file")
 	}
 }
+
+// TestImmediateModeStaysOff guards the live ring configuration. Immediate
+// mode makes libpcap use TPACKET_V2, whose ring slots are each sized for a
+// full snaplen frame (capped at the MTU), whatever the real packet size.
+// Even the 32 MB buffer would then hold only about 500 slots on a 64K-MTU
+// interface such as lo: less than one 800-frame SYN burst, which is how the
+// soak test lost frames with immediate mode on. Do not turn it back on to
+// cut display latency; detection uses packet timestamps and does not care.
+func TestImmediateModeStaysOff(t *testing.T) {
+	if liveImmediateMode {
+		t.Fatal("liveImmediateMode is true: live capture would use fixed-size TPACKET_V2 slots and drop bursts (see the package doc)")
+	}
+	const maxMTUSlot = 65536 // lo's MTU, the largest slot libpcap would use
+	const burst = 800        // one soak-test SYN burst (400 SYN + 400 RST)
+	if slots := liveBufferSize / maxMTUSlot; slots >= burst {
+		t.Logf("a V2 ring would now hold %d slots", slots)
+	} else {
+		t.Logf("with immediate mode a %d MB ring would hold only %d slots, under one %d-frame burst", liveBufferSize>>20, slots, burst)
+	}
+	if liveBufferSize < 32<<20 {
+		t.Errorf("liveBufferSize = %d MB, want at least 32 MB", liveBufferSize>>20)
+	}
+	if readTimeout <= 0 || readTimeout > 100*time.Millisecond {
+		t.Errorf("readTimeout = %v: it must be positive (idle cancellation) and at most 100ms (block delivery latency)", readTimeout)
+	}
+}

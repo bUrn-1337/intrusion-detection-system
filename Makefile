@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: build setcap test lint run clean
+.PHONY: build setcap test scenarios fuzz lint run clean
 
 build:
 	go build -o $(BIN_DIR)/ids ./cmd/ids
@@ -16,6 +16,15 @@ setcap:
 
 test:
 	go test ./...
+
+# Runs every testdata/scenarios/* through the ids pipeline (docs/SCENARIOS.md).
+scenarios:
+	go test -count=1 -run '^TestScenarios$$' ./cmd/ids/
+
+# make fuzz FUZZTIME=2m
+FUZZTIME ?= 30s
+fuzz:
+	go test -run '^$$' -fuzz '^FuzzPipeline$$' -fuzztime $(FUZZTIME) ./cmd/ids/
 
 lint:
 	go vet ./...

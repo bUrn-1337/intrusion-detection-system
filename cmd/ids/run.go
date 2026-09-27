@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ type runOptions struct {
 	log           logging.WriterConfig
 	noTUI         bool
 	statsInterval time.Duration
+	pprof         string
 }
 
 func runIDS(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -69,6 +71,7 @@ func runIDS(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&opt.log.MaxFiles, "log-max-files", logging.DefaultMaxFiles, "rotated log files to keep")
 	fs.BoolVar(&opt.noTUI, "no-tui", false, "no dashboard: print alerts to stdout, one line each (automatic when stdout is not a terminal)")
 	fs.DurationVar(&opt.statsInterval, "stats-interval", time.Minute, "how often a stats record is logged")
+	fs.StringVar(&opt.pprof, "pprof", "", "serve net/http/pprof on `ADDR` for diagnostics; must be 127.0.0.1:PORT")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -90,6 +93,12 @@ func runIDS(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if opt.statsInterval <= 0 {
 		fmt.Fprintln(stderr, "ids run: -stats-interval must be positive")
 		return 2
+	}
+	if opt.pprof != "" {
+		if err := checkPprofAddr(opt.pprof); err != nil {
+			fmt.Fprintln(stderr, "ids run:", err)
+			return 2
+		}
 	}
 	if f, ok := stdout.(*os.File); !ok || !term.IsTerminal(int(f.Fd())) {
 		opt.noTUI = true
@@ -135,10 +144,23 @@ func loadRules(path string) (*rules.RuleSet, error) {
 		return rs, nil
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, fmt.Errorf("rules file %s not found (use -rules PATH)", path)
+	case errors.Is(err, fs.ErrPermission):
+		return nil, fmt.Errorf("rules file %s is not readable: permission denied", path)
 	case errors.As(err, &le):
 		return nil, fmt.Errorf("bad rules in %s, nothing started:\n%s", path, reloadError(err))
 	}
 	return nil, fmt.Errorf("reading rules: %w", err)
+}
+
+// logOpenError explains why the alert log could not be opened.
+func logOpenError(path string, err error) error {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("cannot create alert log %s: directory %s does not exist (create it or use -log PATH)", path, filepath.Dir(path))
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("cannot open alert log %s: permission denied (use -log PATH)", path)
+	}
+	return fmt.Errorf("cannot open alert log %s: %w", path, err)
 }
 
 // reloadError formats a rules error with one problem per line.
@@ -182,6 +204,13 @@ func runPipeline(ctx context.Context, opt runOptions, stdout, stderr io.Writer) 
 	if err != nil {
 		return err
 	}
+	if opt.pprof != "" {
+		stop, err := servePprof(opt.pprof, stderr)
+		if err != nil {
+			return err
+		}
+		defer stop()
+	}
 	c, err := capture.New(opt.capture)
 	if err != nil {
 		return err // capture's messages already say what to do
@@ -189,7 +218,7 @@ func runPipeline(ctx context.Context, opt runOptions, stdout, stderr io.Writer) 
 	defer c.Close()
 	w, err := logging.NewWriter(opt.log)
 	if err != nil {
-		return err
+		return logOpenError(opt.log.Path, err)
 	}
 
 	d := &ids{

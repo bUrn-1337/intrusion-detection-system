@@ -248,8 +248,6 @@ func wantICMP(typ, code uint8, payloadOff int, payload string, csum uint8) resul
 		Csum: csum, Payload: payload}
 }
 
-func with(r result, f func(*result)) result { f(&r); return r }
-
 var (
 	syn    = packet.TCPFlags{SYN: true}
 	ack    = packet.TCPFlags{ACK: true}

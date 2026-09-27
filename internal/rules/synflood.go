@@ -85,11 +85,3 @@ func (d *synFlood) clear() {
 		d.comp.clear()
 	}
 }
-
-func (d *synFlood) len() int {
-	n := d.inc.len()
-	if d.comp != nil {
-		n += d.comp.len()
-	}
-	return n
-}

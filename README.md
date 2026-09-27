@@ -7,6 +7,26 @@ against Snort-style rules loaded from `rules.conf`, and reports matches through
 a log writer and dashboard. The system is split into six modules that
 communicate through a single shared `packet.ParsedPacket` type.
 
+## Quick start
+
+```
+sudo apt install libpcap-dev
+make build
+bin/ids run -r trace.pcap -no-tui  # replay any Ethernet pcap or pcapng
+make setcap                        # once per build, for live capture
+bin/ids run -i eth0                # live, with the dashboard
+bin/ids query -severity high       # read the alert log
+```
+
+## Documentation
+
+| doc | contents |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | pipeline, the ParsedPacket contract, design decisions |
+| [docs/RULES.md](docs/RULES.md) | the rule language, every option with an example |
+| [docs/ADDING_A_DETECTOR.md](docs/ADDING_A_DETECTOR.md) | step-by-step template for a new stateful detector |
+| [docs/SCENARIOS.md](docs/SCENARIOS.md) | end-to-end alert tests and how to add one |
+
 ## Pipeline
 
 ```
@@ -61,8 +81,13 @@ make build   # builds bin/ids and bin/capturedump (a debug tool: parsed packets 
 make setcap  # grants capture capabilities to both binaries (uses sudo)
 make test    # go test ./...
 make lint    # go vet + staticcheck (if installed)
+make scenarios            # every testdata/scenarios case through ids run
+make fuzz FUZZTIME=2m     # fuzz the whole pipeline (default 30s)
 make run ARGS="-i eth0"   # bin/ids run with ARGS, without rebuilding
 ```
+
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs gofmt, vet,
+staticcheck, `go test -race ./...`, `make scenarios` and a 30 s fuzz.
 
 ## Running
 
