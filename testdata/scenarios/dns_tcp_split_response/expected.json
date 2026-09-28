@@ -1,0 +1,38 @@
+{
+  "description": "An A query over TCP gets a 2.9 KB answer (180 records) in three segments; reassembled, it is one valid message and does not alert. On a second connection the server writes the 2-byte length prefix and a malformed response (question name pointing to itself) in separate segments. Per segment that message was classed as unknown traffic and never reported; reassembled, it alerts once.",
+  "alerts": [
+    {
+      "sid": 1000102,
+      "kind": "alert",
+      "src_ip": "192.0.2.53",
+      "src_port": 53,
+      "dst_ip": "10.0.0.5",
+      "dst_port": 41003,
+      "count": [
+        1,
+        1
+      ]
+    }
+  ],
+  "absent_sids": [
+    1000101
+  ],
+  "stream_stats": {
+    "overlap_conflicts": [
+      0,
+      0
+    ],
+    "desyncs": [
+      0,
+      0
+    ],
+    "flows": [
+      0,
+      0
+    ],
+    "messages": [
+      4,
+      4
+    ]
+  }
+}

@@ -1,8 +1,8 @@
 # Adding a detector
 
 A detector is a stateful check that a single-packet rule cannot express,
-switched on with `detect:NAME;` in a rule. There are ten so far, in
-seven shapes; copy the one closer to yours:
+switched on with `detect:NAME;` in a rule. There are eleven so far, in
+eight shapes; copy the one closer to yours:
 
 - `syn_flood` ([synflood.go](../internal/rules/synflood.go)) counts
   events per key in a sliding window: "N incomplete handshakes within S
@@ -32,6 +32,12 @@ seven shapes; copy the one closer to yours:
 - `icmp_tunnel` ([icmptunnel.go](../internal/rules/icmptunnel.go)) keeps
   a value per event (payload size and entropy) in a `windowCounter` and
   judges the whole window when it is full.
+- `slowloris` ([slowloris.go](../internal/rules/slowloris.go)) keeps one
+  entry per TCP connection, fed by the per-flow state the stream stage
+  writes (`FlowID`, the `http_*` AppFields, `ClosedFlows`), and a group
+  per tracked address of the connections that currently qualify. Its
+  conditions are about time passing with no packet, so every entry has a
+  due time in a heap, checked on every packet and in `Flush`.
 
 The example new detector here is `conn_burst` (a made-up name: many
 connections from one source); replace it with yours.
@@ -149,6 +155,11 @@ In `engine.go`:
     checks. The scan detectors use these.
   - Single packets, from `Process` after the whitelist and pass checks
     (ttl_anomaly, via `rs.ttl`).
+  - TCP flow state, from the stream stage (internal/stream): `FlowID`
+    names the connection, the `http_*` AppFields describe the request in
+    progress, and `ClosedFlows` lists connections to forget. slowloris
+    uses these; it applies the whitelist and pass rules to the
+    connection's first packet, and drops the connection when it closes.
   - ARP packets, in `arp` (called from `Process` when `rs.arp` is not
     empty): it feeds the shared ARP tables first, then applies the
     whitelist, pass rules and each rule's addresses.
@@ -159,7 +170,8 @@ In `engine.go`:
     state: it runs only while some rule needs it, is cleared when a
     reload leaves no such rule, and is drained in `Flush`.
 - `Flush`: if the detector holds pending work (syn_flood times out every
-  open handshake), finish it there so the end of a pcap still fires.
+  open handshake, slowloris re-checks connections that are due), finish
+  it there so the end of a pcap still fires.
 
 Use the engine clock (`e.now` or the event time), never `time.Now`.
 
@@ -207,7 +219,8 @@ and one look-alike that must not. For syn_flood these are
 `syn_flood_single_source`, `syn_flood_spoofed`,
 `completed_handshakes_busy` and `scan_is_not_flood`; for port_scan,
 `vertical_syn_scan`, `udp_scan`, `flood_is_not_scan` and
-`browsing_many_hosts`. Write the generators with `pcapgen` in
+`browsing_many_hosts`; for slowloris, `slowloris_slow_headers` and
+`browser_keepalive_idle`. Write the generators with `pcapgen` in
 [cmd/ids/scenario_gen_test.go](../cmd/ids/scenario_gen_test.go) and match
 on `details` in expected.json. A scenario that needs extra rule
 lines (an `arpbind`, a pass rule for the look-alike) lists them in

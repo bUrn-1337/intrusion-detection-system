@@ -1,0 +1,8 @@
+{
+  "description": "Two ClientHellos, each cut 10 bytes before its end, inside the SNI. Only the reassembled record yields the full name: the extra rule for blocked.example.test alerts once and the allowed name does not.",
+  "extra_rules": ["alert tcp any any -> any 443 (msg:\"TLS SNI of a blocked site\"; app_proto:tls; app_field:sni=blocked.example.test; sid:9000001; rev:1; severity:medium; category:policy;)"],
+  "alerts": [
+    {"sid": 9000001, "kind": "alert", "src_ip": "10.0.0.10", "src_port": 50500, "dst_ip": "192.0.2.43", "dst_port": 443, "count": [1, 1]}
+  ],
+  "stream_stats": {"overlap_conflicts": [0, 0], "desyncs": [0, 0], "flows": [0, 0], "messages": [4, 4]}
+}

@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
 )
@@ -31,6 +32,13 @@ const (
 	maxDistinct = 1000
 
 	defaultMaxDistinctPorts = 5
+	// slowloris defaults: see docs/RULES.md.
+	defaultSlowSeconds      = 30
+	defaultSlowHeadersAge   = 10 * time.Second
+	defaultSlowAge          = 20 * time.Second
+	defaultSlowMinRate      = 100
+	defaultSlowMinRemaining = 10 << 10
+	maxSlowBytes            = 1 << 30 // bound of min_rate and min_remaining
 	defaultMinSamples       = 10
 	defaultMaxHopDiff       = 3
 	defaultMinFragSize      = 256
@@ -442,6 +450,7 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 		"same_ip": true, "same_port": true, "eth_dst": true, "itype": true, "icode": true,
 		"ttl": true, "kind": true, "scope": true, "min_samples": true, "max_hop_diff": true,
 		"min_size": true, "arp_op": true, "dsize": true, "metric": true, "max_reply_ratio": true,
+		"stream_anomaly": true, "min_age": true, "min_rate": true, "min_remaining": true,
 	}
 	var ratio bool
 	for _, o := range opts {
@@ -452,7 +461,9 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 			}
 			seen[o.key] = true
 		}
-		if noValue[o.key] {
+		if o.key == "stream_anomaly" {
+			// The value is optional.
+		} else if noValue[o.key] {
 			if o.hasValue {
 				fail("%s takes no value", o.key)
 				continue
@@ -567,6 +578,16 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 			default:
 				fail("app_reason %q: want malformed or suspicious", v)
 			}
+		case "stream_anomaly":
+			switch {
+			case !o.hasValue:
+				r.hasAnomaly = true
+			case v == packet.StreamOverlapConflict, v == packet.StreamOversizeHeaders, v == packet.StreamTooManyOOO:
+				r.hasAnomaly, r.anomaly = true, v
+			default:
+				fail("stream_anomaly %q: want %s, %s or %s, or no value for any", v,
+					packet.StreamOverlapConflict, packet.StreamOversizeHeaders, packet.StreamTooManyOOO)
+			}
 		case "detection_filter":
 			ws, err := parseDetectionFilter(v)
 			if err != nil {
@@ -576,7 +597,7 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 			r.filter = &ws
 		case "detect":
 			if _, ok := detectorOptions[v]; !ok {
-				fail("detect %q: want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood or icmp_tunnel", v)
+				fail("detect %q: want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood, icmp_tunnel or slowloris", v)
 				continue
 			}
 			r.Detect = v
@@ -734,6 +755,26 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 				continue
 			}
 			r.maxReplyRatio = f
+		case "min_age":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, maxSeconds)
+			if err != nil {
+				fail("min_age: %v", err)
+				continue
+			}
+			r.minAge = time.Duration(n) * time.Second
+		case "min_rate", "min_remaining":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, maxSlowBytes)
+			if err != nil {
+				fail("%s: %v", o.key, err)
+				continue
+			}
+			if o.key == "min_rate" {
+				r.minRate = n
+			} else {
+				r.minRemaining = n
+			}
 		case "min_size":
 			detectOpts = append(detectOpts, o.key)
 			n, err := parsePositive(v, 65535)
@@ -859,9 +900,36 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 		case kind != ICMPEcho && kind != "" && seen["track"]:
 			fail("track is only valid with kind:echo (kind:%s always tracks the receiver)", kind)
 		}
+	case DetectSlowloris:
+		if kind != "" && !slices.Contains(slowKinds, kind) {
+			fail("kind %q: want %s", kind, strings.Join(slowKinds, ", "))
+			break
+		}
+		r.slowKind = kind
+		if kind != SlowBody && (seen["min_rate"] || seen["min_remaining"]) {
+			fail("min_rate and min_remaining are only valid with kind:slow_body")
+		}
+		if kind == SlowRead && seen["seconds"] {
+			fail("seconds is not valid with kind:slow_read (a zero window sends no data)")
+		}
+		if !seen["seconds"] {
+			r.detect.seconds = defaultSlowSeconds
+		}
+		if !seen["min_age"] {
+			r.minAge = defaultSlowAge
+			if kind == SlowHeaders {
+				r.minAge = defaultSlowHeadersAge
+			}
+		}
+		if !seen["min_rate"] {
+			r.minRate = defaultSlowMinRate
+		}
+		if !seen["min_remaining"] {
+			r.minRemaining = defaultSlowMinRemaining
+		}
 	}
 	for _, k := range []string{"flags", "content", "app_proto", "app_field", "app_reason", "detection_filter",
-		"same_ip", "same_port", "eth_dst", "itype", "icode", "ttl", "arp_op", "dsize"} {
+		"same_ip", "same_port", "eth_dst", "itype", "icode", "ttl", "arp_op", "dsize", "stream_anomaly"} {
 		if seenOption(opts, k) {
 			fail("option %s cannot be combined with detect", k)
 		}
@@ -876,7 +944,7 @@ func knownOption(k string) bool {
 		"track", "count", "seconds", "min_incomplete_ratio", "max_distinct_ports",
 		"distinct_ports", "distinct_hosts", "same_ip", "same_port", "eth_dst", "itype",
 		"icode", "ttl", "kind", "scope", "min_samples", "max_hop_diff", "min_size", "arp_op",
-		"dsize", "metric", "max_reply_ratio":
+		"dsize", "metric", "max_reply_ratio", "stream_anomaly", "min_age", "min_rate", "min_remaining":
 		return true
 	}
 	return false
@@ -905,13 +973,20 @@ var detectorOptions = map[string]struct{ required, optional []string }{
 	// kinds; parseOptions checks that.
 	DetectICMPFlood:  {required: []string{"kind", "count", "seconds"}, optional: []string{"track"}},
 	DetectICMPTunnel: {required: []string{"count", "seconds"}},
+	// seconds is not valid with kind:slow_read, and min_rate and
+	// min_remaining are valid with kind:slow_body only; parseOptions
+	// checks that.
+	DetectSlowloris: {required: []string{"kind", "track", "count"}, optional: []string{"seconds", "min_age", "min_rate", "min_remaining"}},
 }
+
+// slowKinds lists the slowloris kinds.
+var slowKinds = []string{SlowHeaders, SlowBody, SlowRead}
 
 // detectorsTaking names the detectors that accept option k, for errors.
 func detectorsTaking(k string) string {
 	var names []string
 	for _, d := range []string{DetectSYNFlood, DetectPortScan, DetectHostSweep, DetectPingSweep, DetectTTLAnomaly, DetectFragAttack, DetectARPSpoof,
-		DetectUDPFlood, DetectICMPFlood, DetectICMPTunnel} {
+		DetectUDPFlood, DetectICMPFlood, DetectICMPTunnel, DetectSlowloris} {
 		spec := detectorOptions[d]
 		if slices.Contains(spec.required, k) || slices.Contains(spec.optional, k) {
 			names = append(names, d)
@@ -958,6 +1033,13 @@ func checkProtoOptions(r *Rule, fail func(string, ...any)) {
 		if r.Proto != ProtoICMP {
 			fail("detect:%s requires protocol icmp", r.Detect)
 		}
+	case DetectSlowloris:
+		if r.Proto != ProtoTCP {
+			fail("detect:%s requires protocol tcp", r.Detect)
+		}
+	}
+	if r.hasAnomaly && r.Proto != ProtoTCP && r.Proto != ProtoIP {
+		fail("stream_anomaly requires protocol tcp or ip")
 	}
 	if r.arpOp != 0 && r.Proto != ProtoARP {
 		fail("arp_op requires protocol arp")

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
 )
@@ -268,7 +269,7 @@ func TestParseErrors(t *testing.T) {
 		{"detection_filter count", hdr + `(msg:"m"; sid:1; detection_filter:track by_src, count 0, seconds 1;)`, "count"},
 		{"detection_filter term", hdr + `(msg:"m"; sid:1; detection_filter:track by_src, count 5, secs 1;)`, `unknown term "secs"`},
 		{"detection_filter too big", hdr + `(msg:"m"; sid:1; detection_filter:track by_src, count 100001, seconds 1;)`, "1 to 100000"},
-		{"detect unknown", hdr + `(msg:"m"; sid:1; detect:port_sweep;)`, `detect "port_sweep": want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood or icmp_tunnel`},
+		{"detect unknown", hdr + `(msg:"m"; sid:1; detect:port_sweep;)`, `detect "port_sweep": want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood, icmp_tunnel or slowloris`},
 		{"port_scan missing params", hdr + `(msg:"m"; sid:1; detect:port_scan;)`, "detect:port_scan needs distinct_ports, seconds"},
 		{"port_scan with track", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10; track:by_dst;)`, "option track is not valid with detect:port_scan"},
 		{"port_scan with count", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10; count:5;)`, "option count is not valid with detect:port_scan"},
@@ -316,6 +317,21 @@ func TestParseErrors(t *testing.T) {
 		{"unbalanced bracket", `alert tcp [10.0.0.1 any -> any any (msg:"m"; sid:1;)`, "unbalanced '['"},
 		{"unterminated quote", hdr + `(msg:"m; sid:1;)`, "unterminated quoted string"},
 		{"empty option", hdr + `(msg:"m";; sid:1;)`, "empty option"},
+		{"stream_anomaly reason", hdr + `(msg:"m"; sid:1; stream_anomaly:gap;)`, `stream_anomaly "gap": want overlap_conflict, oversize_headers or too_many_ooo_segments, or no value for any`},
+		{"stream_anomaly empty", hdr + `(msg:"m"; sid:1; stream_anomaly:;)`, `stream_anomaly ""`},
+		{"stream_anomaly twice", hdr + `(msg:"m"; sid:1; stream_anomaly; stream_anomaly:oversize_headers;)`, "option stream_anomaly given more than once"},
+		{"stream_anomaly on udp", `alert udp any any -> any any (msg:"m"; sid:1; stream_anomaly;)`, "stream_anomaly requires protocol tcp or ip"},
+		{"stream_anomaly with detect", hdr + `(msg:"m"; sid:1; detect:slowloris; kind:slow_read; track:by_src; count:5; stream_anomaly;)`, "option stream_anomaly cannot be combined with detect"},
+		{"slowloris missing", hdr + `(msg:"m"; sid:1; detect:slowloris; kind:slow_read;)`, "detect:slowloris needs track, count"},
+		{"slowloris kind", hdr + `(msg:"m"; sid:1; detect:slowloris; kind:slow_write; track:by_src; count:5;)`, `kind "slow_write": want slow_headers, slow_body, slow_read`},
+		{"slowloris on udp", `alert udp any any -> any any (msg:"m"; sid:1; detect:slowloris; kind:slow_read; track:by_src; count:5;)`, "detect:slowloris requires protocol tcp"},
+		{"slowloris min_rate", hdr + `(msg:"m"; sid:1; detect:slowloris; kind:slow_headers; track:by_src; count:5; min_rate:10;)`, "min_rate and min_remaining are only valid with kind:slow_body"},
+		{"slowloris min_remaining", hdr + `(msg:"m"; sid:1; detect:slowloris; kind:slow_read; track:by_src; count:5; min_remaining:10;)`, "min_rate and min_remaining are only valid with kind:slow_body"},
+		{"slowloris read seconds", hdr + `(msg:"m"; sid:1; detect:slowloris; kind:slow_read; track:by_src; count:5; seconds:5;)`, "seconds is not valid with kind:slow_read"},
+		{"slowloris min_age", hdr + `(msg:"m"; sid:1; detect:slowloris; kind:slow_read; track:by_src; count:5; min_age:0;)`, "min_age"},
+		{"slowloris min_rate big", hdr + `(msg:"m"; sid:1; detect:slowloris; kind:slow_body; track:by_src; count:5; min_rate:2000000000;)`, "min_rate"},
+		{"min_age elsewhere", hdr + `(msg:"m"; sid:1; min_age:5;)`, "option min_age is only valid with detect:slowloris"},
+		{"min_age other detector", hdr + `(msg:"m"; sid:1; detect:syn_flood; track:by_dst; count:5; seconds:1; min_age:5;)`, "option min_age is not valid with detect:syn_flood"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -400,7 +416,7 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rules.conf: %v", err)
 	}
-	if rs.Len() != 43 || len(rs.detectors) != 25 {
+	if rs.Len() != 49 || len(rs.detectors) != 29 {
 		t.Errorf("rules.conf: %d rules, %d detectors", rs.Len(), len(rs.detectors))
 	}
 	for _, r := range rs.Rules() {
@@ -528,4 +544,42 @@ func fuzzPacket(t *testing.T, p pkt) *packet.ParsedPacket {
 		fuzzPackets[p] = b
 	}
 	return parseFrame(append([]byte(nil), b...), t0)
+}
+
+func TestParseSlowloris(t *testing.T) {
+	rs := mustParse(t, `alert tcp any any -> any 80 (msg:"a"; detect:slowloris; kind:slow_headers; track:by_dst; count:20; sid:1;)
+alert tcp any any -> any 80 (msg:"b"; detect:slowloris; kind:slow_body; track:by_src; count:10; sid:2;)
+alert tcp any any -> any 80 (msg:"c"; detect:slowloris; kind:slow_read; track:by_src; count:10; sid:3;)
+alert tcp any any -> any 80 (msg:"d"; detect:slowloris; kind:slow_body; track:by_src; count:3; seconds:60; min_age:5; min_rate:50; min_remaining:1000; sid:4;)
+alert tcp any any -> any any (msg:"e"; stream_anomaly; sid:5;)
+alert ip any any -> any any (msg:"f"; stream_anomaly:overlap_conflict; sid:6;)
+`)
+	type want struct {
+		kind              string
+		track             Track
+		count, seconds    int
+		minAge            time.Duration
+		minRate, minRemai int
+	}
+	for i, w := range []want{
+		{SlowHeaders, TrackByDst, 20, 30, 10 * time.Second, 100, 10240},
+		{SlowBody, TrackBySrc, 10, 30, 20 * time.Second, 100, 10240},
+		{SlowRead, TrackBySrc, 10, 30, 20 * time.Second, 100, 10240},
+		{SlowBody, TrackBySrc, 3, 60, 5 * time.Second, 50, 1000},
+	} {
+		r := rs.rules[i]
+		got := want{r.slowKind, r.detect.track, r.detect.count, r.detect.seconds, r.minAge, r.minRate, r.minRemaining}
+		if got != w {
+			t.Errorf("rule %d: %+v, want %+v", i, got, w)
+		}
+	}
+	if len(rs.slow) != 4 || len(rs.detectors) != 4 {
+		t.Errorf("slow %d detectors %d", len(rs.slow), len(rs.detectors))
+	}
+	if r := rs.rules[4]; !r.hasAnomaly || r.anomaly != "" {
+		t.Errorf("stream_anomaly: %v %q", r.hasAnomaly, r.anomaly)
+	}
+	if r := rs.rules[5]; !r.hasAnomaly || r.anomaly != packet.StreamOverlapConflict {
+		t.Errorf("stream_anomaly:overlap_conflict: %v %q", r.hasAnomaly, r.anomaly)
+	}
 }

@@ -1292,3 +1292,374 @@ func genMLDFromUnspecified(w *pcapgen.Writer) {
 	ns := append([]byte{0, 0, 0, 0}, net.ParseIP("fe80::5")...)
 	w.Add(pcapgen.Pkt{Proto: "icmp", Src: "::", Dst: "ff02::1:ff00:5", TTL: 255, ICMP: &[2]uint8{135, 0}, EthDst: net.HardwareAddr{0x33, 0x33, 0xff, 0, 0, 5}, Payload: ns})
 }
+
+// ---------------------------------------------------------------------
+// TCP stream reassembly (internal/stream) and slow HTTP attacks. The
+// traversal request is the one from http_double_encoding; the rule
+// (1000202) needs the whole request head to see that the URI is
+// suspicious.
+
+const (
+	traversalReq = "GET /static/%252e%252e%252fetc%252fpasswd HTTP/1.1\r\nHost: www.example.test\r\nAuthorization: Basic YWRtaW46aHVudGVyMg==\r\n\r\n"
+	okResp       = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+)
+
+// splitAt cuts s at the given offsets.
+func splitAt(s string, offs ...int) []string {
+	var out []string
+	prev := 0
+	for _, o := range offs {
+		out = append(out, s[prev:o])
+		prev = o
+	}
+	return append(out, s[prev:])
+}
+
+// genHTTPRequestSplit3: the traversal request in three segments, cut
+// inside "%25" and inside the Authorization header, so no segment holds
+// a whole request line or header.
+func genHTTPRequestSplit3(w *pcapgen.Writer) {
+	c := w.Conn("203.0.113.9", 43000, "192.0.2.80", 80)
+	c.Handshake()
+	for _, part := range splitAt(traversalReq, 14, 80) {
+		c.Send(true, []byte(part))
+	}
+	c.Send(false, []byte(okResp))
+	c.Close()
+}
+
+// genHTTPOutOfOrder: the same three segments arrive 3, 1, 2.
+func genHTTPOutOfOrder(w *pcapgen.Writer) {
+	c := w.Conn("203.0.113.9", 43001, "192.0.2.80", 80)
+	c.Handshake()
+	parts := splitAt(traversalReq, 14, 80)
+	c.Seg(true, 80, []byte(parts[2]))
+	c.Seg(true, 0, []byte(parts[0]))
+	c.Seg(true, 14, []byte(parts[1]))
+	c.Advance(true, len(traversalReq))
+	c.Send(false, []byte(okResp))
+	c.Close()
+}
+
+// genHTTPPipelined: a benign request, the traversal request and another
+// benign one, pipelined in two segments whose boundary falls inside the
+// traversal request line.
+func genHTTPPipelined(w *pcapgen.Writer) {
+	c := w.Conn("203.0.113.9", 43002, "192.0.2.80", 80)
+	c.Handshake()
+	a := "GET /index.html HTTP/1.1\r\nHost: www.example.test\r\n\r\n"
+	b := "GET /favicon.ico HTTP/1.1\r\nHost: www.example.test\r\n\r\n"
+	all := a + traversalReq + b
+	for _, part := range splitAt(all, len(a)+20) {
+		c.Send(true, []byte(part))
+	}
+	c.Send(false, []byte(okResp+okResp+okResp))
+	c.Close()
+}
+
+// genHTTPMidstreamPickup: the IDS starts while a POST body is being sent
+// (no handshake seen). The body tail is not parsed; the next request
+// starts at a clean boundary, the direction resyncs, and the request,
+// split in two, is reassembled.
+func genHTTPMidstreamPickup(w *pcapgen.Writer) {
+	c := w.Conn("203.0.113.9", 43003, "192.0.2.80", 80)
+	c.SetISN(7_000_000, 9_000_000)
+	c.Send(true, []byte("x=1&y=2&comment=%25%25%25 GET / HTTP/1.1\r\n\r\n")) // body tail
+	c.Send(false, []byte(okResp))
+	for _, part := range splitAt(traversalReq, 30) {
+		c.Send(true, []byte(part))
+	}
+	c.Send(false, []byte(okResp))
+	c.Close()
+}
+
+// genDNSAXFRSplitPrefix: an AXFR query over TCP whose 2-byte length
+// prefix is split: the first segment is one byte.
+func genDNSAXFRSplitPrefix(w *pcapgen.Writer) {
+	c := w.Conn("10.0.0.5", 41001, "192.0.2.53", 53)
+	c.Handshake()
+	msg := pcapgen.TCPDNS(pcapgen.DNSQuery(0x4243, "example.test", 252))
+	c.Send(true, msg[:1])
+	c.Send(true, msg[1:])
+	refused := pcapgen.DNSQuery(0x4243, "example.test", 252)
+	refused[2], refused[3] = 0x81, 0x05
+	c.Send(false, pcapgen.TCPDNS(refused))
+	c.Close()
+}
+
+// genDNSTCPSplitResponse: a normal A query over TCP (after a truncated
+// UDP answer) gets a 2.9 KB response in three segments, which must stay
+// quiet. On a second connection the server writes the length prefix and
+// a malformed response (a question name that points to itself) in
+// separate segments. Per segment, the message did not start its segment
+// and was classed as unknown traffic, so it was never reported.
+func genDNSTCPSplitResponse(w *pcapgen.Writer) {
+	c := w.Conn("10.0.0.5", 41002, "192.0.2.53", 53)
+	c.Handshake()
+	c.Send(true, pcapgen.TCPDNS(pcapgen.DNSQuery(0x5151, "big.example.test", 1)))
+	const n = 180
+	m := binary.BigEndian.AppendUint16(nil, 0x5151)
+	m = append(m, 0x81, 0x80, 0, 1)
+	m = binary.BigEndian.AppendUint16(m, n)
+	m = append(m, 0, 0, 0, 0)
+	m = append(m, pcapgen.DNSName("big.example.test")...)
+	m = append(m, 0, 1, 0, 1)
+	for i := range n {
+		m = append(m, 0xC0, 12, 0, 1, 0, 1, 0, 0, 0x0e, 0x10, 0, 4, 198, 51, byte(100+i/250), byte(i%250))
+	}
+	resp := pcapgen.TCPDNS(m)
+	for _, part := range splitAt(string(resp), 1400, 2800) {
+		c.Send(false, []byte(part))
+	}
+	c.Close()
+
+	c = w.Conn("10.0.0.5", 41003, "192.0.2.53", 53)
+	c.Handshake()
+	c.Send(true, pcapgen.TCPDNS(pcapgen.DNSQuery(0x5252, "loop.example.test", 1)))
+	loop := binary.BigEndian.AppendUint16(nil, 0x5252)
+	loop = append(loop, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0, 0xC0, 12, 0, 1, 0, 1)
+	framed := pcapgen.TCPDNS(loop)
+	c.Send(false, framed[:2])
+	c.Send(false, framed[2:])
+	c.Close()
+}
+
+// genTLSClientHelloSplit: a ClientHello cut in the middle of its SNI
+// ("blocked.example.test"), and a second connection to an allowed name.
+// The scenario's extra rule matches the blocked SNI.
+func genTLSClientHelloSplit(w *pcapgen.Writer) {
+	for i, name := range []string{"blocked.example.test", "www.example.test"} {
+		c := w.Conn("10.0.0.10", 50500+uint16(i), "192.0.2.43", 443)
+		c.Handshake()
+		hello := pcapgen.TLSClientHello(name)
+		cut := len(hello) - 10
+		c.Send(true, hello[:cut])
+		c.Send(true, hello[cut:])
+		c.Send(false, []byte{0x16, 3, 3, 0, 4, 2, 0, 0, 0})
+		c.Close()
+	}
+}
+
+// genTCPSeqWraparound: the traversal request, in two segments, crosses
+// the 2^32 sequence number wrap.
+func genTCPSeqWraparound(w *pcapgen.Writer) {
+	c := w.Conn("203.0.113.9", 43004, "192.0.2.80", 80)
+	c.SetISN(0xFFFFFFFF-40, 0xFFFFFF00)
+	c.Handshake()
+	for _, part := range splitAt(traversalReq, 60) {
+		c.Send(true, []byte(part))
+	}
+	c.Send(false, []byte(okResp))
+	c.Close()
+}
+
+// genTCPRetransmissionIdentical: the first segment of a request is
+// retransmitted with the same bytes (a lost ACK), and the server's
+// response is too. Neither is an anomaly, and the request alerts once.
+func genTCPRetransmissionIdentical(w *pcapgen.Writer) {
+	c := w.Conn("203.0.113.9", 43005, "192.0.2.80", 80)
+	c.Handshake()
+	parts := splitAt(traversalReq, 40)
+	c.Seg(true, 0, []byte(parts[0]))
+	w.Wait(200 * time.Millisecond)
+	c.Seg(true, 0, []byte(parts[0])) // RTO retransmission
+	c.Advance(true, 40)
+	c.Send(true, []byte(parts[1]))
+	c.Seg(false, 0, []byte(okResp))
+	c.Seg(false, 0, []byte(okResp))
+	c.Advance(false, len(okResp))
+	c.Close()
+}
+
+// genTCPOverlapConflict: a request head in progress, then a
+// "retransmission" of the same sequence range with different bytes: an
+// IDS that keeps the first copy sees /index.html, a server that keeps
+// the last sees the traversal.
+func genTCPOverlapConflict(w *pcapgen.Writer) {
+	c := w.Conn("203.0.113.66", 43006, "192.0.2.80", 80)
+	c.Handshake()
+	benign := "GET /index.html?aaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\n"
+	evil := "GET /static/%252e%252e%252fetc%252fpasswd HTTP/1.1\r\n"
+	if len(benign) != len(evil) {
+		panic(fmt.Sprintf("overlap: %d != %d bytes", len(benign), len(evil)))
+	}
+	c.Seg(true, 0, []byte(benign))
+	c.Seg(true, 0, []byte(evil))
+	c.Advance(true, len(benign))
+	c.Send(true, []byte("Host: www.example.test\r\n\r\n"))
+	c.Send(false, []byte(okResp))
+	c.Close()
+}
+
+// genOversizeHeaders: one request with 20 KB of cookies in 1400-byte
+// segments, and one from another client with 8 KB, which is normal.
+func genOversizeHeaders(w *pcapgen.Writer) {
+	for i, size := range []int{20000, 8000} {
+		c := w.Conn(fmt.Sprintf("10.0.0.%d", 60+i), 43100, "192.0.2.80", 80)
+		c.Handshake()
+		req := "GET / HTTP/1.1\r\nHost: www.example.test\r\nCookie: " + strings.Repeat("a", size) + "\r\n\r\n"
+		for off := 0; off < len(req); off += 1400 {
+			c.Send(true, []byte(req[off:min(off+1400, len(req))]))
+		}
+		c.Send(false, []byte(okResp))
+		c.Close()
+	}
+}
+
+// slowHeaderConns opens one connection per client/server pair, sends an
+// incomplete request head, then one more header line on every connection
+// every 5 s for 40 s, and resets them all.
+func slowHeaderConns(w *pcapgen.Writer, clients, servers []string) {
+	var conns []*pcapgen.Conn
+	for i, cl := range clients {
+		c := w.Conn(cl, 44000+uint16(i), servers[i%len(servers)], 80)
+		c.Handshake()
+		c.Send(true, []byte("GET /?"+fmt.Sprint(i)+" HTTP/1.1\r\nHost: www.example.test\r\nUser-Agent: Mozilla/5.0\r\n"))
+		conns = append(conns, c)
+	}
+	for range 8 {
+		w.Wait(5 * time.Second)
+		for _, c := range conns {
+			c.Send(true, []byte("X-a: b\r\n"))
+		}
+	}
+	for _, c := range conns {
+		c.Reset(true)
+	}
+}
+
+func repeatAddr(addr string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = addr
+	}
+	return out
+}
+
+// genSlowlorisSlowHeaders: 30 slow connections from one attacker, spread
+// over two servers (15 each, under the per-server count of 20).
+func genSlowlorisSlowHeaders(w *pcapgen.Writer) {
+	slowHeaderConns(w, repeatAddr("203.0.113.50", 30), []string{"192.0.2.80", "192.0.2.81"})
+}
+
+// genSlowlorisByDst: 25 attackers with one slow connection each, all to
+// one server.
+func genSlowlorisByDst(w *pcapgen.Writer) {
+	var clients []string
+	for i := range 25 {
+		clients = append(clients, fmt.Sprintf("203.0.113.%d", 100+i))
+	}
+	slowHeaderConns(w, clients, []string{"192.0.2.80"})
+}
+
+// genRUDYSlowBody: 12 POSTs declaring 100 KB, each sending 10 bytes of
+// body every 5 s for 40 s.
+func genRUDYSlowBody(w *pcapgen.Writer) {
+	var conns []*pcapgen.Conn
+	for i := range 12 {
+		c := w.Conn("203.0.113.51", 45000+uint16(i), "192.0.2.80", 80)
+		c.Handshake()
+		c.Send(true, []byte("POST /comment HTTP/1.1\r\nHost: www.example.test\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 100000\r\n\r\n"))
+		conns = append(conns, c)
+	}
+	for range 8 {
+		w.Wait(5 * time.Second)
+		for _, c := range conns {
+			c.Send(true, []byte("text=aaaaa"))
+		}
+	}
+	for _, c := range conns {
+		c.Reset(true)
+	}
+}
+
+// genSlowReadZeroWindow: 12 clients request a large file and then
+// advertise a zero window; the server probes every 5 s for 30 s and
+// each probe gets a zero-window ACK.
+func genSlowReadZeroWindow(w *pcapgen.Writer) {
+	var conns []*pcapgen.Conn
+	for i := range 12 {
+		c := w.Conn("203.0.113.52", 46000+uint16(i), "192.0.2.80", 80)
+		c.Handshake()
+		c.Send(true, []byte("GET /big.iso HTTP/1.1\r\nHost: www.example.test\r\n\r\n"))
+		c.Push(false, []byte("HTTP/1.1 200 OK\r\nContent-Length: 1000000000\r\n\r\n"+strings.Repeat("x", 1000)))
+		c.Ack(true, true)
+		conns = append(conns, c)
+	}
+	for range 6 {
+		w.Wait(5 * time.Second)
+		for _, c := range conns {
+			c.Ack(false, false) // window probe
+			c.Ack(true, true)
+		}
+	}
+	for _, c := range conns {
+		c.Reset(true)
+	}
+}
+
+// genBrowserKeepaliveIdle: a browser keeps 50 connections to one server
+// open after complete requests and responses, idle for 60 s with TCP
+// keep-alives every 15 s, then closes them.
+func genBrowserKeepaliveIdle(w *pcapgen.Writer) {
+	var conns []*pcapgen.Conn
+	for i := range 50 {
+		c := w.Conn("10.0.0.70", 47000+uint16(i), "192.0.2.80", 80)
+		c.Handshake()
+		c.Send(true, []byte(fmt.Sprintf("GET /asset/%d.js HTTP/1.1\r\nHost: www.example.test\r\nConnection: keep-alive\r\n\r\n", i)))
+		c.Send(false, []byte("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nx=1;"))
+		conns = append(conns, c)
+	}
+	for range 4 {
+		w.Wait(15 * time.Second)
+		for _, c := range conns {
+			c.Ack(true, false)
+			c.Ack(false, false)
+		}
+	}
+	for _, c := range conns {
+		c.Close()
+	}
+}
+
+// genSlowButLegitUpload: 12 uploads of 1 MB over a slow link, 2500 bytes
+// every 5 s (500 B/s each) for 40 s.
+func genSlowButLegitUpload(w *pcapgen.Writer) {
+	var conns []*pcapgen.Conn
+	for i := range 12 {
+		c := w.Conn("10.0.0.71", 48000+uint16(i), "192.0.2.80", 80)
+		c.Handshake()
+		c.Send(true, []byte("POST /upload HTTP/1.1\r\nHost: www.example.test\r\nContent-Type: application/octet-stream\r\nContent-Length: 1000000\r\n\r\n"))
+		conns = append(conns, c)
+	}
+	chunk := []byte(strings.Repeat("u", 1250))
+	for range 8 {
+		w.Wait(5 * time.Second)
+		for _, c := range conns {
+			c.Send(true, chunk)
+			c.Send(true, chunk)
+		}
+	}
+	for _, c := range conns {
+		c.Reset(true)
+	}
+}
+
+// genStreamMemoryCap: with -stream-max-mem 1M, 4000 clients each leave a
+// request head half sent; the oldest flows are evicted. The traversal
+// request, split in two, still alerts on a flow opened after them.
+func genStreamMemoryCap(w *pcapgen.Writer) {
+	w.Step = 100 * time.Microsecond
+	for i := range 4000 {
+		c := w.Conn(fmt.Sprintf("10.1.%d.%d", i/250, i%250+1), 49000, "192.0.2.80", 80)
+		c.Handshake()
+		c.Send(true, []byte("GET /page HTTP/1.1\r\nHost: www.example.test\r\n"))
+	}
+	c := w.Conn("203.0.113.9", 43007, "192.0.2.80", 80)
+	c.Handshake()
+	for _, part := range splitAt(traversalReq, 30) {
+		c.Send(true, []byte(part))
+	}
+	c.Send(false, []byte(okResp))
+	c.Close()
+}

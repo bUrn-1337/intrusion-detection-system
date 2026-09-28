@@ -83,7 +83,8 @@ func fixedModel() *Model {
 		Now: t0.Add(83 * time.Second),
 		Header: Header{Source: "interface lo", Started: t0, Rules: 8,
 			Reload: "FAILED, kept 8 rules: rules.conf:58: bad option", ReloadOK: false, ReloadAt: t0.Add(80 * time.Second)},
-		Health: Health{Captured: 123456, KernelDropped: 0, QueueDropped: 42, QueueDepth: 7, LogDropped: 0},
+		Health: Health{Captured: 123456, KernelDropped: 0, QueueDropped: 42, QueueDepth: 7, LogDropped: 0,
+			StreamFlows: 321, StreamBuffered: 3 << 20, StreamEvictions: 5, StreamGaps: 11, StreamDesyncs: 12, StreamOverlaps: 2},
 		Snap: logging.Snapshot{
 			Packets: 123000, Bytes: 45 << 20, PPS: 1500, BPS: 2 << 20, AvgPPS: 750, AvgBPS: 1 << 20, Alerts: 3,
 			ByL4:       []logging.Count{{Name: "TCP", Packets: 100000}, {Name: "UDP", Packets: 23000}},
@@ -114,6 +115,7 @@ func TestRenderPanels(t *testing.T) {
 		"Traffic", "1.50k", "750", "2.00 MiB", "1.00 MiB", "123000", "45.00 MiB",
 		// Health.
 		"Capture health", "123456", "Kernel drops", "Queue drops", "Queue depth", "Log records drop",
+		"Streams      321", "3.00 MiB", "Stream evictions", "11/12/2",
 		// Protocols.
 		"TCP", "100000", "81.3%", "UDP", "HTTP", "NONE",
 		// Talkers and alerting sources.

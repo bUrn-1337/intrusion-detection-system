@@ -92,6 +92,8 @@ const (
 	TableICMPPeers       = "icmp_peers"
 	TableEchoRequests    = "echo_requests"
 	TableICMPTunnel      = "icmp_tunnel"
+	TableSlowFlows       = "slow_flows"
+	TableSlowloris       = "slowloris"
 )
 
 // EngineStats is a snapshot of engine counters.
@@ -153,6 +155,7 @@ type Engine struct {
 	arpTable      *arpTable
 	arpReqs       *arpRequests
 	echoReqs      *recentSet[echoKey] // outstanding echo requests, for icmp_flood kind:unsolicited_reply
+	slow          *slowTable          // HTTP flows that may be slow, for slowloris
 
 	packets, alerts, summaries, suppressed, passed, whitelisted atomic.Uint64
 	reloads, reloadFails                                        atomic.Uint64
@@ -181,12 +184,14 @@ const (
 	tICMPPeers
 	tEchoRequests
 	tICMPTunnel
+	tSlowFlows
+	tSlowloris
 	numTables
 )
 
 var tableNames = [numTables]string{TableDedup, TableHandshake, TableDetectionFilter, TableSYNFlood, TablePortScan, TableHostSweep, TablePingSweep,
 	TableTTLAnomaly, TableFragments, TableFragFlood, TableTTLFlows, TableARPBindings, TableARPRequests, TableARPSpoof,
-	TableUDPFlood, TableUDPFlows, TableICMPFlood, TableICMPPeers, TableEchoRequests, TableICMPTunnel}
+	TableUDPFlood, TableUDPFlows, TableICMPFlood, TableICMPPeers, TableEchoRequests, TableICMPTunnel, TableSlowFlows, TableSlowloris}
 
 // scanTables maps a scan detector to its table.
 var scanTables = map[string]int{DetectPortScan: tPortScan, DetectHostSweep: tHostSweep, DetectPingSweep: tPingSweep}
@@ -231,6 +236,7 @@ func NewEngine(rs *RuleSet, cfg EngineConfig) *Engine {
 	e.arpTable = newARPTable(cfg.MaxKeys, &e.tables[tARPBindings])
 	e.arpReqs = newARPRequests(cfg.MaxKeys, &e.tables[tARPRequests])
 	e.echoReqs = newRecentSet[echoKey](echoRequestIdle, cfg.MaxKeys, &e.tables[tEchoRequests])
+	e.slow = newSlowTable(cfg.MaxKeys, &e.tables[tSlowFlows], &e.tables[tSlowloris])
 	e.next.Store(rs)
 	e.nRules.Store(int64(rs.Len()))
 	e.activate(rs)
@@ -367,6 +373,7 @@ func (e *Engine) activate(rs *RuleSet) {
 	if !rs.echoReqs {
 		e.echoReqs.clear()
 	}
+	e.activateSlow(rs)
 	e.active, e.ruleState = rs, states
 }
 
@@ -414,6 +421,9 @@ func (e *Engine) Process(p *packet.ParsedPacket) []Alert {
 	if len(rs.icmp) > 0 && v.g == gICMP {
 		out = e.icmp(rs, p, &v, out)
 	}
+	if len(rs.slow) > 0 {
+		out = e.slowloris(rs, p, &v, out)
+	}
 
 	switch {
 	case v.g == gNone:
@@ -439,8 +449,10 @@ func (e *Engine) Process(p *packet.ParsedPacket) []Alert {
 }
 
 // Flush ends the input: every pending handshake times out (which may
-// still fire a detector), then every open dedup window is closed and its
-// summary emitted. The clock advances to the last handshake deadline.
+// still fire a detector), slow HTTP connections due for a check are
+// checked at the current clock, then every open dedup window is closed
+// and its summary emitted. The clock advances to the last handshake
+// deadline.
 func (e *Engine) Flush() []Alert {
 	if rs := e.next.Load(); rs != e.active {
 		e.activate(rs)
@@ -463,6 +475,9 @@ func (e *Engine) Flush() []Alert {
 			}
 		}
 		out = e.fragExpired(e.active, e.fragBuf, out)
+	}
+	if len(e.active.slow) > 0 {
+		out = e.slowAge(out)
 	}
 	out = e.dedup.flush(e.now, out)
 	e.count(out)

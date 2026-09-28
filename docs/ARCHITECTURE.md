@@ -11,7 +11,8 @@
    v
  [queue: chan, 10000] ---> lower.Parse   Ethernet, VLAN, IPv4/IPv6, ARP
    live: drop when full      upper.Parse   TCP, UDP, ICMP/ICMPv6, checksums
-   file: wait                app.Parse     HTTP, DNS, FTP, TLS ClientHello
+   file: wait                stream.Process  TCP reassembly on app ports
+                             app.Parse     HTTP, DNS, FTP, TLS ClientHello
                              engine.Process  rules, handshakes, dedup
                                |
                                +--> alerts --> [chan] --> JSON Lines log (rotating)
@@ -31,7 +32,9 @@ writes a final stats record and closes the log.
 only thing stages share.
 
 - Each field is written by exactly one stage and read only by later ones.
-  The field comments name the owner (1 capture, 2 lower, 3 upper, 4 app).
+  The field comments name the owner (1 capture, 2 lower, 3 upper, the
+  stream stage, 4 app). The stream stage may also write the `http_*`
+  entries of `AppFields` before stage 4 adds its own.
 - `RawData` is a copy owned by the packet, never a buffer libpcap reuses,
   and no stage modifies it.
 - A stage never rejects a packet. It fills in what it could decode and
@@ -53,11 +56,21 @@ only thing stages share.
 
 ## Design decisions
 
-**Stateless parsers.** Every parser decodes one frame on its own: there is
-no TCP reassembly, flow table or IP defragmentation. That keeps parsing
-bounded and impossible to exhaust with state, at the price of missing
-anything split across segments (see [Known gaps](#known-gaps)). State
-lives in the rule engine, in bounded tables.
+**Stateless parsers, one bounded stream stage.** Every parser decodes one
+frame on its own; nothing defragments IP. Between the transport and
+application parsers, [internal/stream](../internal/stream/stream.go)
+reassembles TCP on the application ports (21, 53, 80, 8000, 8080, 443,
+8443; `-stream-ports`) and hands the parser whole messages in `AppData`.
+It buffers only the message in progress in each direction, never
+bodies: an HTTP head up to 16 KiB, a DNS message up to 64 KiB, an FTP
+line up to 8 KiB, a TLS first record up to 16 KiB, plus up to 16
+out-of-order segments. Sequence numbers use RFC 1982 serial arithmetic.
+Flows end on FIN from both sides, RST or 2 minutes idle; past 64 MiB in
+total (`-stream-max-mem`), the least recently used flows are evicted.
+A flow picked up mid-stream, or one that lost bytes, starts desynced and
+is parsed one segment at a time (as before reassembly) until a segment
+starts a message. Other state lives in the rule engine, in bounded
+tables.
 
 **Single-threaded parse and engine.** One goroutine parses and matches
 every packet, in capture order. The handshake tracker and the dedup
@@ -96,7 +109,8 @@ redaction itself.
 detection_filter, syn_flood, port_scan, host_sweep, ping_sweep,
 ttl_anomaly, ttl_flows, fragments, frag_flood, arp_bindings,
 arp_requests, arp_spoof, udp_flood, udp_flows, icmp_flood, icmp_peers,
-echo_requests and icmp_tunnel) holds at most 50,000 keys. At the
+echo_requests, icmp_tunnel, slow_flows and slowloris) holds at most
+50,000 keys. At the
 cap, the least recently seen key is evicted and counted in the stats
 record (`evictions`), so memory stays flat under attack. An evicted
 handshake counts as incomplete, which is right for a flood. In the
@@ -106,7 +120,15 @@ syn_flood and ttl_anomaly each evict 950,000 keys, port_scan and
 host_sweep sit at the 50,000 cap (every timed-out handshake is also a
 probe), and the by_dst alert still fires. The same capture peaked at
 104 MB before the scan detectors, and 150 MB before ttl_anomaly, which
-keeps an entry for every external source it sees.
+keeps an entry for every external source it sees. The stream stage
+(port 80 is reassembled) raises it to about 350 MB: every SYN opens a
+stream flow, the 64 MiB budget holds about 106,000 of them and evicts
+the rest, and the garbage collector's headroom roughly doubles that
+live heap. `-stream-max-mem` trades flood RSS against how many real
+flows survive a flood. Replay throughput on that capture drops from
+about 220,000 to 160,000 packets/s (flow allocation, the flow map, and
+GC scanning of the flow table); on a mixed 1,000,000-packet capture it
+goes from about 400,000 to 345,000.
 
 **by_dst SYN-flood tracking.** A spoofed flood uses a new source for every
 SYN, so no source ever reaches the threshold. `track:by_dst` counts failed
@@ -216,19 +238,27 @@ captured; the `any` device and macOS loopback cannot.
 
 ## Known gaps
 
-**DNS over TCP split across segments.** Without TCP reassembly, the DNS
-parser sees each segment alone. When a client or server writes the 2-byte
-length prefix and the message separately, or a boundary splits the prefix
-1+1, the segment holding the message does not start with its length. Such
-a segment does not frame cleanly and is classed as unknown traffic, not
-malformed DNS (it used to raise a false `Malformed DNS message` alert on
-tcpdump's `dns_tcp.pcap`). The price is that the message is not decoded at
-all: in chrissanders' `dns_axfr.pcapng` the AXFR query arrives as a
-2-byte prefix segment followed by the message, so a rule on
-`app_field:qtype_name=AXFR` misses it. Likewise, a malformed message is
-reported only when its length prefix matches the segment, since the start
-of a longer message could be misaligned. TCP stream reassembly, planned
-for the next step, closes this gap.
+**What TCP reassembly cannot see.** The stream stage closed the gap of
+messages split across segments (a DNS length prefix sent apart from its
+message, HTTP heads and TLS ClientHellos over several segments), but:
+
+- Only the application ports are reassembled; HTTP on port 8888 is still
+  parsed per segment. `-stream-ports` adds ports.
+- Bodies are skipped, not buffered, so a conflicting retransmission of
+  body bytes, or of any bytes older than the last delivered message, is
+  not detected as `overlap_conflict`.
+- A message that never completes (a slowloris head, a connection reset
+  mid-message) is never parsed; slowloris sees it through the HTTP state
+  instead.
+- A flow picked up mid-stream that never reaches a message boundary (a
+  long download, a TLS session after its handshake) stays per segment and
+  is invisible to `detect:slowloris`.
+- A flood of new flows past `-stream-max-mem` evicts real ones, which then
+  continue desynced. Each flow is charged its own size and map slot (631
+  bytes on amd64) plus its buffers, so the 64 MiB default holds at most
+  about 106,000 flows.
+- HTTP/2, WebSocket (after a 101), CONNECT tunnels and FTP after AUTH TLS
+  go back to per-segment parsing.
 
 **Scans the engine cannot see.** A UDP probe to an open or filtered port
 gets no ICMP answer and is not counted, so a UDP scan is only seen through

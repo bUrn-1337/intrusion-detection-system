@@ -2,8 +2,8 @@
 // rules from a file and matches them against packets that have been
 // through the Module 2-4 parsers, with alert deduplication and stateful
 // detectors: SYN flood, port scan, host sweep, ping sweep, TTL anomaly,
-// fragment attacks, ARP spoofing, UDP floods, ICMP floods and ICMP
-// tunnels.
+// fragment attacks, ARP spoofing, UDP floods, ICMP floods, ICMP
+// tunnels and slow HTTP (slowloris).
 //
 // # Rule file
 //
@@ -23,7 +23,8 @@
 // counts as a probe and the scan detectors, ttlAnomaly for the TTL
 // anomaly detector, fragmentTracker (frag.go) for the fragment attack
 // detectors, arpTable, arpRequests and arpSpoof (arp.go) for the ARP
-// spoofing detector, udpFlood and icmpFlood for the flood detectors, and
+// spoofing detector, udpFlood and icmpFlood for the flood detectors,
 // icmpTunnel and standardEcho (icmptunnel.go, echopayload.go) for the
-// ICMP tunnel detector.
+// ICMP tunnel detector, and slowTable (slowloris.go) for the slow HTTP
+// detector, which reads the per-flow state of the stream stage.
 package rules

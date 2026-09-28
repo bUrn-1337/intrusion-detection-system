@@ -40,7 +40,10 @@ const (
 // parseTLS recognizes a TLS record header and extracts the server name
 // from a ClientHello. Sniffing (hinted false) accepts only handshake
 // records; on a TLS port any record type (20-24) is accepted. Non-handshake
-// records and other handshake messages are AppTLS with no fields.
+// records and other handshake messages are AppTLS with no fields. A
+// ClientHello longer than b is reported with sni_status truncated when the
+// server name lies beyond it; the stream stage passes the whole record
+// when it reassembles the direction.
 func parseTLS(b []byte, hinted bool) *result {
 	if len(b) < tlsRecordHeaderLen || b[1] != 3 || b[2] > 4 {
 		return nil

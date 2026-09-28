@@ -1,0 +1,8 @@
+{
+  "description": "R-U-Dead-Yet: 12 POSTs declare a 100 KB body and send 10 bytes every 5 s (2 B/s). After 20 s, 10 flows qualify and the slow-body rule alerts; the summary counts all 12.",
+  "alerts": [
+    {"sid": 1000032, "kind": "alert", "src_ip": "203.0.113.51", "count": [1, 1], "details": {"kind": "slow_body", "flows": "10", "min_rate": "100"}},
+    {"sid": 1000032, "kind": "summary", "src_ip": "203.0.113.51", "count": [3, 3]}
+  ],
+  "absent_sids": [1000030, 1000031]
+}

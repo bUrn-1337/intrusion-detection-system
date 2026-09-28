@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/bUrn-1337/intrusion-detection-system/internal/rules"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/stream"
 )
 
 // Record types, the "type" field of every log line.
@@ -34,6 +35,7 @@ type StatsRecord struct {
 	Source  string        `json:"source"` // "interface eth0" or "file x.pcap"
 	Capture CaptureStats  `json:"capture"`
 	Engine  EngineStats   `json:"engine"`
+	Stream  StreamStats   `json:"stream"`
 	Traffic TrafficTotals `json:"traffic"`
 	Log     WriterStats   `json:"log"`
 }
@@ -61,6 +63,36 @@ type EngineStats struct {
 	// FragmentsOverLimit counts datagrams with too many fragments to track.
 	FragmentsOverLimit uint64                `json:"fragments_over_limit"`
 	Tables             map[string]TableStats `json:"tables"`
+}
+
+// StreamStats is stream.Stats with JSON names.
+type StreamStats struct {
+	Flows            int64  `json:"flows"`
+	FlowsTotal       uint64 `json:"flows_total"`
+	Closed           uint64 `json:"closed"`
+	IdleClosed       uint64 `json:"idle_closed"`
+	Evictions        uint64 `json:"evictions"`
+	Gaps             uint64 `json:"gaps"`
+	Desyncs          uint64 `json:"desyncs"`
+	Resyncs          uint64 `json:"resyncs"`
+	OverlapConflicts uint64 `json:"overlap_conflicts"`
+	OversizeHeaders  uint64 `json:"oversize_headers"`
+	OOOOverflows     uint64 `json:"ooo_overflows"`
+	CapDrops         uint64 `json:"cap_drops"`
+	Messages         uint64 `json:"messages"`
+	Buffered         int64  `json:"buffered_bytes"`
+	BufferedPeak     int64  `json:"buffered_peak_bytes"`
+	Charged          int64  `json:"charged_bytes"`
+}
+
+// StreamStatsFrom converts the stream stage's counters for logging.
+func StreamStatsFrom(s stream.Stats) StreamStats {
+	return StreamStats{
+		Flows: s.Flows, FlowsTotal: s.FlowsTotal, Closed: s.Closed, IdleClosed: s.IdleClosed,
+		Evictions: s.Evictions, Gaps: s.Gaps, Desyncs: s.Desyncs, Resyncs: s.Resyncs,
+		OverlapConflicts: s.OverlapConflicts, OversizeHeaders: s.OversizeHeaders, OOOOverflows: s.OOOOverflows,
+		CapDrops: s.CapDrops, Messages: s.Messages, Buffered: s.Buffered, BufferedPeak: s.BufferedPeak, Charged: s.Charged,
+	}
 }
 
 // TableStats is rules.TableStats with JSON names.

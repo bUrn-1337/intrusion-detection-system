@@ -1,10 +1,28 @@
 // Package app implements Module 4: application-layer parsing of DNS, HTTP/1.x,
 // the FTP control channel and the TLS ClientHello server name.
 //
-// Parse runs after upper.Parse and hand-decodes p.Payload(). It is
-// stateless: it looks at one packet at a time and keeps no per-connection
-// memory, so a message split across TCP segments is decoded only as far as
-// this segment goes.
+// Parse runs after the stream stage (internal/stream) and is stateless: it
+// looks at one packet at a time and keeps no per-connection memory.
+//
+// # Input: reassembled or per-segment
+//
+// When the stream stage is reassembling the packet's direction
+// (p.StreamProto is set), Parse decodes only p.AppData, the messages the
+// packet completed, and never the segment on its own: each HTTP message
+// head (pipelined requests one by one), each length-prefixed DNS message,
+// each FTP line, or the first TLS record. The first message recognized
+// fills AppFields and the others AppMore. A packet that completed no
+// message gets AppProtocol = StreamProto and no fields, and its partial
+// payload is never reported as malformed.
+//
+// Otherwise (UDP, ports the stream stage does not track, and TCP
+// directions that are desynced, evicted, picked up mid-stream before a
+// clean boundary, or handed back to per-segment parsing, such as TLS after
+// its first record) Parse decodes p.Payload() alone, so a message split
+// across segments is decoded only as far as this segment goes. That path
+// keeps its workarounds for split messages: a DNS-over-TCP segment that
+// does not frame cleanly is unknown traffic, and a ClientHello cut off by
+// the segment end has sni_status "truncated".
 //
 // # Classification
 //
@@ -34,6 +52,10 @@
 package app
 
 import (
+	"bytes"
+	"encoding/binary"
+	"strings"
+
 	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
 )
 
@@ -59,6 +81,10 @@ func Parse(p *packet.ParsedPacket) {
 	}
 	payload := p.Payload()
 	if len(payload) == 0 {
+		return
+	}
+	if isTCP && p.StreamProto != "" {
+		parseStream(p)
 		return
 	}
 
@@ -175,6 +201,98 @@ func (r *result) commit(p *packet.ParsedPacket) {
 	for _, s := range r.suspicious {
 		p.AddAppReason(packet.ReasonSuspicious, s)
 	}
+}
+
+// parseStream decodes the reassembled messages in p.AppData.
+func parseStream(p *packet.ParsedPacket) {
+	if p.AppData == nil {
+		p.AppProtocol = p.StreamProto
+		return
+	}
+	var results []*result
+	add := func(r *result) {
+		if r != nil {
+			results = append(results, r)
+		}
+	}
+	b := p.AppData
+	switch p.StreamProto {
+	case packet.AppHTTP:
+		for len(b) > 0 {
+			n := httpHeadLen(b)
+			r := parseHTTP(b[:n], true)
+			if r != nil && r.has("request_complete") {
+				r.set("request_complete", "true")
+			}
+			add(r)
+			b = b[n:]
+		}
+	case packet.AppDNS:
+		for len(b) >= 2 {
+			n := min(len(b), 2+int(binary.BigEndian.Uint16(b)))
+			add(decodeDNS(b[2:n], n-2, true))
+			b = b[n:]
+		}
+	case packet.AppFTP:
+		for len(b) > 0 {
+			n := len(b)
+			if i := bytes.IndexByte(b, '\n'); i >= 0 {
+				n = i + 1
+			}
+			add(parseFTP(b[:n]))
+			b = b[n:]
+		}
+	case packet.AppTLS:
+		add(parseTLS(b, true))
+	}
+	if len(results) == 0 {
+		(&result{proto: packet.AppUnknown}).commit(p)
+		return
+	}
+	results[0].commit(p)
+	for _, r := range results[1:] {
+		p.AppMore = append(p.AppMore, r.fieldMap(p))
+	}
+}
+
+// httpHeadLen returns the length of the first message head in b, up to
+// and including its blank line ("\r\n\r\n", or "\n\n" from lenient
+// senders), or len(b).
+func httpHeadLen(b []byte) int {
+	for i := 0; i < len(b); {
+		j := bytes.IndexByte(b[i:], '\n')
+		if j < 0 {
+			break
+		}
+		k := i + j + 1
+		if k < len(b) && b[k] == '\n' {
+			return k + 1
+		}
+		if k+1 < len(b) && b[k] == '\r' && b[k+1] == '\n' {
+			return k + 2
+		}
+		i = k
+	}
+	return len(b)
+}
+
+// fieldMap returns the result as an AppMore entry, and records its
+// malformed reasons in p.ParseErrors like commit does.
+func (r *result) fieldMap(p *packet.ParsedPacket) map[string]string {
+	m := make(map[string]string, len(r.fields)+2)
+	for _, f := range r.fields {
+		m[f.key] = f.value
+	}
+	if len(r.malformed) > 0 {
+		m[packet.ReasonMalformed+"_reason"] = strings.Join(r.malformed, ";")
+		for _, s := range r.malformed {
+			p.AddError(errPrefix(r.proto) + s)
+		}
+	}
+	if len(r.suspicious) > 0 {
+		m[packet.ReasonSuspicious+"_reason"] = strings.Join(r.suspicious, ";")
+	}
+	return m
 }
 
 func errPrefix(proto string) string {

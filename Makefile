@@ -21,10 +21,11 @@ test:
 scenarios:
 	go test -count=1 -run '^TestScenarios$$' ./cmd/ids/
 
-# make fuzz FUZZTIME=2m
+# make fuzz FUZZTIME=2m, make fuzz FUZZ=FuzzStream
+FUZZ ?= FuzzPipeline
 FUZZTIME ?= 30s
 fuzz:
-	go test -run '^$$' -fuzz '^FuzzPipeline$$' -fuzztime $(FUZZTIME) ./cmd/ids/
+	go test -run '^$$' -fuzz '^$(FUZZ)$$' -fuzztime $(FUZZTIME) ./cmd/ids/
 
 lint:
 	go vet ./...

@@ -76,6 +76,14 @@ const (
 	DetectUDPFlood   = "udp_flood"
 	DetectICMPFlood  = "icmp_flood"
 	DetectICMPTunnel = "icmp_tunnel"
+	DetectSlowloris  = "slowloris"
+)
+
+// Values of the slowloris kind option.
+const (
+	SlowHeaders = "slow_headers"
+	SlowBody    = "slow_body"
+	SlowRead    = "slow_read"
 )
 
 // Values of the frag_attack kind option.
@@ -121,6 +129,10 @@ type Rule struct {
 	ttl              ttlCheck
 	dsize            dsizeCheck
 	arpOp            uint16 // packet.ARPRequest or packet.ARPReply, or 0 for no check
+	// stream_anomaly: hasAnomaly is set by the option; anomaly is the
+	// reason it names, or "" for any.
+	hasAnomaly bool
+	anomaly    string
 
 	contents   []contentMatch
 	appProto   string // packet.AppDNS etc., or ""
@@ -155,6 +167,13 @@ type Rule struct {
 
 	// icmp_flood
 	icmpKind string
+
+	// slowloris; detect.seconds is the activity window of slow_headers
+	// and slow_body.
+	slowKind     string
+	minAge       time.Duration
+	minRate      int // slow_body: bytes per second
+	minRemaining int // slow_body: bytes of declared body still to come
 }
 
 // Values of Rule.ethDst.
@@ -246,6 +265,7 @@ type RuleSet struct {
 	arp    []*Rule // detect:arp_spoof rules; the ARP tables run when non-empty
 	udp    []*Rule // detect:udp_flood rules
 	icmp   []*Rule // detect:icmp_flood and icmp_tunnel rules
+	slow   []*Rule // detect:slowloris rules; the slow flow table runs when non-empty
 	// echoReqs is true when some icmp_flood rule has kind
 	// unsolicited_reply, so outstanding echo requests are tracked.
 	echoReqs bool
@@ -323,6 +343,8 @@ func newRuleSet(file string, rules []*Rule, static map[netip.Addr]mac6) *RuleSet
 				if r.icmpKind == ICMPUnsolicitedReply {
 					rs.echoReqs = true
 				}
+			case DetectSlowloris:
+				rs.slow = append(rs.slow, r)
 			}
 			continue
 		}
@@ -349,6 +371,9 @@ type view struct {
 	payload, lower []byte
 	havePayload    bool
 	haveLower      bool
+
+	appLower     []byte // lowercased p.AppData
+	haveAppLower bool
 }
 
 func (v *view) init(p *packet.ParsedPacket) {
@@ -410,6 +435,14 @@ func (v *view) getLower() []byte {
 	return v.lower
 }
 
+func (v *view) getAppLower() []byte {
+	if !v.haveAppLower {
+		v.haveAppLower = true
+		v.appLower = asciiLower(v.p.AppData)
+	}
+	return v.appLower
+}
+
 // asciiLower returns a lowercased copy of b, folding only A-Z so that
 // binary payloads keep their length and offsets.
 func asciiLower(b []byte) []byte {
@@ -460,6 +493,9 @@ func (r *Rule) match(v *view) bool {
 			return false
 		}
 	}
+	if r.hasAnomaly && (v.p == nil || v.p.StreamAnomaly == "" || r.anomaly != "" && v.p.StreamAnomaly != r.anomaly) {
+		return false
+	}
 	if r.appProto != "" || len(r.appFields) > 0 || len(r.appReasons) > 0 {
 		if v.p == nil {
 			return false
@@ -467,24 +503,53 @@ func (r *Rule) match(v *view) bool {
 		if r.appProto != "" && v.p.AppProtocol != r.appProto {
 			return false
 		}
-		for _, f := range r.appFields {
-			got, ok := v.p.AppFields[f.key]
-			if !ok || !strings.EqualFold(got, f.value) {
-				return false
+		// With several messages (AppMore), one of them must satisfy
+		// every app_field and app_reason.
+		if len(r.appFields) > 0 || len(r.appReasons) > 0 {
+			ok := r.matchApp(v.p.AppFields)
+			for i := 0; !ok && i < len(v.p.AppMore); i++ {
+				ok = r.matchApp(v.p.AppMore[i])
 			}
-		}
-		for _, k := range r.appReasons {
-			if v.p.AppFields[k] == "" {
+			if !ok {
 				return false
 			}
 		}
 	}
-	for _, c := range r.contents {
-		hay := v.getPayload()
-		if c.nocase {
-			hay = v.getLower()
+	if len(r.contents) == 0 {
+		return true
+	}
+	// Every content must be in the segment's payload, or every content in
+	// the messages it completed (AppData), which may span segments.
+	if r.matchContents(v.getPayload(), v.getLower) {
+		return true
+	}
+	return v.p != nil && v.p.AppData != nil && r.matchContents(v.p.AppData, v.getAppLower)
+}
+
+func (r *Rule) matchApp(fields map[string]string) bool {
+	for _, f := range r.appFields {
+		got, ok := fields[f.key]
+		if !ok || !strings.EqualFold(got, f.value) {
+			return false
 		}
-		if !bytes.Contains(hay, c.pat) {
+	}
+	for _, k := range r.appReasons {
+		if fields[k] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// matchContents reports whether every content is in hay, or in lower()
+// (hay lowercased) for nocase ones.
+func (r *Rule) matchContents(hay []byte, lower func() []byte) bool {
+	for _, c := range r.contents {
+		h := hay
+		if c.nocase {
+			h = lower()
+		}
+		if !bytes.Contains(h, c.pat) {
 			return false
 		}
 	}

@@ -7,6 +7,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -40,6 +41,9 @@ type scenarioSpec struct {
 	// LogMustNotContain lists strings (credentials) that must not appear
 	// anywhere in the log or on stdout.
 	LogMustNotContain []string `json:"log_must_not_contain"`
+	// StreamStats bounds counters of the shutdown stats record's "stream"
+	// object, each as an inclusive [min, max].
+	StreamStats map[string][]int `json:"stream_stats"`
 }
 
 // expectedAlert matches alert records on stable fields only. Empty or
@@ -116,75 +120,93 @@ func or(s, def string) string {
 // scenarioGenerators write each scenario's pcap at test time. A scenario
 // with a checked-in capture.pcap needs no generator.
 var scenarioGenerators = map[string]func(w *pcapgen.Writer){
-	"syn_flood_single_source":      genSYNFloodSingleSource,
-	"syn_flood_spoofed":            genSYNFloodSpoofed,
-	"completed_handshakes_busy":    genCompletedHandshakesBusy,
-	"whitelisted_flood":            genSYNFloodSingleSource, // same traffic, the attacker is whitelisted
-	"dns_axfr":                     genDNSAXFR,
-	"dns_malformed_loop":           genDNSMalformedLoop,
-	"http_basic_auth":              genHTTPBasicAuth,
-	"http_double_encoding":         genHTTPDoubleEncoding,
-	"ftp_bruteforce":               genFTPBruteforce,
-	"ftp_plaintext_pass":           genFTPPlaintextPass,
-	"benign_mixed":                 genBenignMixed,
-	"vertical_syn_scan":            genVerticalSYNScan,
-	"fin_scan":                     genFlagScan("F"),
-	"null_scan":                    genFlagScan(""),
-	"xmas_scan":                    genFlagScan("FPU"),
-	"synfin_packet":                genSYNFINPacket,
-	"udp_scan":                     genUDPScan,
-	"horizontal_sweep_port22":      genHorizontalSweep22,
-	"ping_sweep":                   genPingSweep,
-	"scan_is_not_flood":            genScanIsNotFlood,
-	"flood_is_not_scan":            genFloodIsNotScan,
-	"browsing_many_hosts":          genBrowsingManyHosts,
-	"ids_started_mid_connection":   genIDSStartedMidConnection,
-	"land_attack":                  genLandAttack,
-	"land_ip_only":                 genLandIPOnly,
-	"smurf_broadcast_mac":          genSmurfBroadcastMAC,
-	"smurf_limited_broadcast":      genSmurfLimitedBroadcast,
-	"ipv6_multicast_ping":          genIPv6MulticastPing,
-	"traceroute":                   genTraceroute,
-	"ttl_spoofed_source":           genTTLSpoofedSource,
-	"ttl_nat_mixed_os":             genTTLNATMixedOS,
-	"ttl_route_change_single":      genTTLRouteChangeSingle,
-	"teardrop_overlap":             genTeardropOverlap,
-	"fragment_exact_duplicate":     genFragmentExactDuplicate,
-	"tiny_first_fragment":          genTinyFirstFragment,
-	"tiny_ipv6_first_fragment":     genTinyIPv6FirstFragment,
-	"ping_of_death":                genPingOfDeath,
-	"fragment_flood":               genFragmentFlood,
-	"legit_large_ping":             genLegitLargePing,
-	"wsl_dns_proxy_loopback":       genWSLDNSProxyLoopback,
-	"ttl_lb_completed_connections": genTTLLoadBalancedConns,
-	"arp_normal_lan":               genARPNormalLAN,
-	"arp_probe_zero_sender":        genARPProbeZeroSender,
-	"arp_dhcp_reassign":            genARPDHCPReassign,
-	"arp_static_violation":         genARPStaticViolation,
-	"arp_flip_flop":                genARPFlipFlop,
-	"arp_unsolicited_replies":      genARPUnsolicitedReplies,
-	"arp_multi_ip":                 genARPMultiIP("10.1.1", pcapgen.MAC(attackerMAC)),
-	"arp_proxy_router_passed":      genARPMultiIP("10.20.0", pcapgen.MAC(1)),
-	"arp_eth_mismatch":             genARPEthMismatch,
-	"arp_invalid_sender_mac":       genARPInvalidSenderMAC,
-	"udp_flood_single_source":      genUDPFloodSingleSource,
-	"udp_flood_spoofed":            genUDPFloodSpoofed,
-	"udp_flood_bytes":              genUDPFloodBytes,
-	"quic_download":                genQUICDownload,
-	"voip_call":                    genVoIPCall,
-	"udp_flood_to_closed_port":     genUDPFloodToClosedPort,
-	"icmp_echo_flood":              genICMPEchoFlood,
-	"icmp_monitoring_pings":        genICMPMonitoringPings,
-	"smurf_victim":                 genSmurfVictim,
-	"normal_ping_replies":          genNormalPingReplies,
-	"icmp_error_flood":             genICMPErrorFlood,
-	"icmp_tunnel_varied_sizes":     genICMPTunnelVariedSizes,
-	"icmp_tunnel_high_entropy":     genICMPTunnelHighEntropy,
-	"linux_ping_standard":          genLinuxPingStandard,
-	"windows_ping_standard":        genWindowsPingStandard,
-	"large_standard_ping":          genLargeStandardPing,
-	"reflection_ntp_ssdp":          genReflectionNTPSSDP,
-	"mld_from_unspecified":         genMLDFromUnspecified,
+	"syn_flood_single_source":       genSYNFloodSingleSource,
+	"syn_flood_spoofed":             genSYNFloodSpoofed,
+	"completed_handshakes_busy":     genCompletedHandshakesBusy,
+	"whitelisted_flood":             genSYNFloodSingleSource, // same traffic, the attacker is whitelisted
+	"dns_axfr":                      genDNSAXFR,
+	"dns_malformed_loop":            genDNSMalformedLoop,
+	"http_basic_auth":               genHTTPBasicAuth,
+	"http_double_encoding":          genHTTPDoubleEncoding,
+	"ftp_bruteforce":                genFTPBruteforce,
+	"ftp_plaintext_pass":            genFTPPlaintextPass,
+	"benign_mixed":                  genBenignMixed,
+	"vertical_syn_scan":             genVerticalSYNScan,
+	"fin_scan":                      genFlagScan("F"),
+	"null_scan":                     genFlagScan(""),
+	"xmas_scan":                     genFlagScan("FPU"),
+	"synfin_packet":                 genSYNFINPacket,
+	"udp_scan":                      genUDPScan,
+	"horizontal_sweep_port22":       genHorizontalSweep22,
+	"ping_sweep":                    genPingSweep,
+	"scan_is_not_flood":             genScanIsNotFlood,
+	"flood_is_not_scan":             genFloodIsNotScan,
+	"browsing_many_hosts":           genBrowsingManyHosts,
+	"ids_started_mid_connection":    genIDSStartedMidConnection,
+	"land_attack":                   genLandAttack,
+	"land_ip_only":                  genLandIPOnly,
+	"smurf_broadcast_mac":           genSmurfBroadcastMAC,
+	"smurf_limited_broadcast":       genSmurfLimitedBroadcast,
+	"ipv6_multicast_ping":           genIPv6MulticastPing,
+	"traceroute":                    genTraceroute,
+	"ttl_spoofed_source":            genTTLSpoofedSource,
+	"ttl_nat_mixed_os":              genTTLNATMixedOS,
+	"ttl_route_change_single":       genTTLRouteChangeSingle,
+	"teardrop_overlap":              genTeardropOverlap,
+	"fragment_exact_duplicate":      genFragmentExactDuplicate,
+	"tiny_first_fragment":           genTinyFirstFragment,
+	"tiny_ipv6_first_fragment":      genTinyIPv6FirstFragment,
+	"ping_of_death":                 genPingOfDeath,
+	"fragment_flood":                genFragmentFlood,
+	"legit_large_ping":              genLegitLargePing,
+	"wsl_dns_proxy_loopback":        genWSLDNSProxyLoopback,
+	"ttl_lb_completed_connections":  genTTLLoadBalancedConns,
+	"arp_normal_lan":                genARPNormalLAN,
+	"arp_probe_zero_sender":         genARPProbeZeroSender,
+	"arp_dhcp_reassign":             genARPDHCPReassign,
+	"arp_static_violation":          genARPStaticViolation,
+	"arp_flip_flop":                 genARPFlipFlop,
+	"arp_unsolicited_replies":       genARPUnsolicitedReplies,
+	"arp_multi_ip":                  genARPMultiIP("10.1.1", pcapgen.MAC(attackerMAC)),
+	"arp_proxy_router_passed":       genARPMultiIP("10.20.0", pcapgen.MAC(1)),
+	"arp_eth_mismatch":              genARPEthMismatch,
+	"arp_invalid_sender_mac":        genARPInvalidSenderMAC,
+	"udp_flood_single_source":       genUDPFloodSingleSource,
+	"udp_flood_spoofed":             genUDPFloodSpoofed,
+	"udp_flood_bytes":               genUDPFloodBytes,
+	"quic_download":                 genQUICDownload,
+	"voip_call":                     genVoIPCall,
+	"udp_flood_to_closed_port":      genUDPFloodToClosedPort,
+	"icmp_echo_flood":               genICMPEchoFlood,
+	"icmp_monitoring_pings":         genICMPMonitoringPings,
+	"smurf_victim":                  genSmurfVictim,
+	"normal_ping_replies":           genNormalPingReplies,
+	"icmp_error_flood":              genICMPErrorFlood,
+	"icmp_tunnel_varied_sizes":      genICMPTunnelVariedSizes,
+	"icmp_tunnel_high_entropy":      genICMPTunnelHighEntropy,
+	"linux_ping_standard":           genLinuxPingStandard,
+	"windows_ping_standard":         genWindowsPingStandard,
+	"large_standard_ping":           genLargeStandardPing,
+	"reflection_ntp_ssdp":           genReflectionNTPSSDP,
+	"mld_from_unspecified":          genMLDFromUnspecified,
+	"http_request_split_3_segments": genHTTPRequestSplit3,
+	"http_out_of_order":             genHTTPOutOfOrder,
+	"http_pipelined":                genHTTPPipelined,
+	"http_midstream_pickup":         genHTTPMidstreamPickup,
+	"dns_axfr_split_prefix":         genDNSAXFRSplitPrefix,
+	"dns_tcp_split_response":        genDNSTCPSplitResponse,
+	"tls_clienthello_split":         genTLSClientHelloSplit,
+	"tcp_seq_wraparound":            genTCPSeqWraparound,
+	"tcp_retransmission_identical":  genTCPRetransmissionIdentical,
+	"tcp_overlap_conflict":          genTCPOverlapConflict,
+	"oversize_headers":              genOversizeHeaders,
+	"slowloris_slow_headers":        genSlowlorisSlowHeaders,
+	"slowloris_by_dst":              genSlowlorisByDst,
+	"rudy_slow_body":                genRUDYSlowBody,
+	"slow_read_zero_window":         genSlowReadZeroWindow,
+	"browser_keepalive_idle":        genBrowserKeepaliveIdle,
+	"slow_but_legit_upload":         genSlowButLegitUpload,
+	"stream_memory_cap":             genStreamMemoryCap,
 }
 
 func TestScenarios(t *testing.T) {
@@ -270,7 +292,18 @@ func runScenario(t *testing.T, name string) {
 	}
 
 	var got []gotAlert
+	var problems []string
+	var stream map[string]json.Number
 	for _, r := range readLog(t, logPath) {
+		if r.Type == "stats" {
+			var s struct {
+				Stream map[string]json.Number `json:"stream"`
+			}
+			if err := json.Unmarshal(r.Raw, &s); err != nil {
+				t.Fatal(err)
+			}
+			stream = s.Stream // the last one is the shutdown record
+		}
 		if r.Type != "alert" {
 			continue
 		}
@@ -281,7 +314,17 @@ func runScenario(t *testing.T, name string) {
 		got = append(got, g)
 	}
 
-	var problems []string
+	for _, k := range slices.Sorted(maps.Keys(spec.StreamStats)) {
+		lim := spec.StreamStats[k]
+		v, ok := stream[k]
+		n, err := v.Int64()
+		if len(lim) != 2 {
+			t.Fatalf("%s/expected.json: stream_stats %s: want [min, max]", dir, k)
+		}
+		if !ok || err != nil || n < int64(lim[0]) || n > int64(lim[1]) {
+			problems = append(problems, fmt.Sprintf("stream_stats: %s = %q, want %d..%d", k, v, lim[0], lim[1]))
+		}
+	}
 	used := make([]bool, len(got))
 	for _, e := range spec.Alerts {
 		found := false
