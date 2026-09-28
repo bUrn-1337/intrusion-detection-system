@@ -293,11 +293,13 @@ type ParsedPacket struct {
 	// FlowID identifies the tracked TCP flow this packet belongs to, in
 	// both directions. IDs are never reused within a run. It is 0 for a
 	// packet the stream stage does not track (another protocol or port,
-	// or a segment that opens no flow: a RST, or a bare ACK or FIN of a
-	// flow it does not know).
+	// or a segment of a connection that has not carried data yet: flows
+	// are opened by the first segment with payload, so a SYN, SYN-ACK,
+	// bare ACK, FIN or RST before it has FlowID 0).
 	FlowID uint64
 	// FlowStart is the engine time (packet time, never going backwards)
-	// of the flow's first packet. It is zero when FlowID is 0.
+	// of the flow's SYN, or of its first data segment if no SYN was seen.
+	// It is zero when FlowID is 0.
 	FlowStart time.Time
 	// StreamProto is AppHTTP, AppDNS, AppFTP or AppTLS when the stream
 	// stage is reassembling this packet's direction of the flow, and ""
@@ -343,8 +345,15 @@ type ParsedPacket struct {
 	// "not present in the packet".
 	//
 	// Keys by protocol:
-	//   HTTP: "method", "uri", "uri_decoded" (uri percent-decoded once),
-	//         "version" ("1.1", or "2.0" for the h2c preface), "host",
+	//   HTTP: "method", "uri", "uri_decoded" (uri percent-decoded once,
+	//         then overlong UTF-8 sequences such as C0 AE replaced by the
+	//         character they encode), "query" (the part of uri after the
+	//         first '?' and before any '#', with '+' turned into a space,
+	//         then percent-decoded once; absent without a '?'),
+	//         "headers_raw" (every header line read, joined by "\n", cut
+	//         at 8 KiB; Authorization and Proxy-Authorization values are
+	//         "<redacted>" and nameless lines are left out), "version"
+	//         ("1.1", or "2.0" for the h2c preface), "host",
 	//         "user_agent", "status_code", "content_type",
 	//         "content_length", "auth_basic" ("true" if an
 	//         Authorization: Basic header is present), "request_complete"

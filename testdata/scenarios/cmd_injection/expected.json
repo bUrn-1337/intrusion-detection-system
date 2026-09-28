@@ -1,0 +1,6 @@
+{
+  "description": "host=8.8.8.8%3Bid on a ping tool: a shell separator then a command. The command injection rule fires once.",
+  "alerts": [
+    {"sid": 1000219, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "dst_port": 80, "count": [1, 1]}
+  ]
+}

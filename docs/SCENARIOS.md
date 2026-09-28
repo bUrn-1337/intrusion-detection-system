@@ -55,6 +55,20 @@ writes a bare ACK (`Pkt.ZeroWindow` advertises a zero window), and
 `Reset` a RST. A `Conn` used without `Handshake` is a connection the IDS
 picked up mid-stream.
 
+For application traffic, `pcapgen.DNSQuery(id, name, qtype)`,
+`DNSAnswerA` and `TCPDNS` build DNS messages, and
+`pcapgen.TLSClientHello(sni)` a ClientHello. In the generator file,
+`dnsLookup(w, client, cport, id, name, qtype, rcode)` writes a query to
+the resolver 192.0.2.53 and its answer (`rcode` 3 for NXDOMAIN),
+`dnsResp(q, rcode, n)` turns a query into a response padded by `n` bytes
+(a large answer for amplification), and `webAttack(webGet(uri,
+headers...), ...)` sends each request from 203.0.113.9 on its own
+connection after a benign page load. The DNS detectors key on the query
+table, so a spoofing or reflection scenario writes the responses without
+their queries, and a race writes the query first. Random names (DGA,
+tunnel labels) come from `rand.New(rand.NewPCG(seed, seed))`, so the
+pcap is the same on every run.
+
 ## expected.json
 
 | field | meaning |

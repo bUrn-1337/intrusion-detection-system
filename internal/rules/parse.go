@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -451,6 +452,7 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 		"ttl": true, "kind": true, "scope": true, "min_samples": true, "max_hop_diff": true,
 		"min_size": true, "arp_op": true, "dsize": true, "metric": true, "max_reply_ratio": true,
 		"stream_anomaly": true, "min_age": true, "min_rate": true, "min_remaining": true,
+		"allow": true, "min_bytes": true, "min_ratio": true, "min_entropy": true, "min_length": true,
 	}
 	var ratio bool
 	for _, o := range opts {
@@ -571,6 +573,80 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 			default:
 				r.appFields = append(r.appFields, appField{key: k, value: val})
 			}
+		case "app_content":
+			k, pat, nocase, err := parseAppContent(v)
+			if err != nil {
+				fail("app_content: %v", err)
+				continue
+			}
+			if nocase {
+				pat = string(asciiLower([]byte(pat)))
+			}
+			r.appContents = append(r.appContents, appContent{key: k, pat: pat, nocase: nocase})
+		case "app_domain":
+			k, list, ok := strings.Cut(v, ",")
+			k, list = strings.TrimSpace(k), strings.TrimSpace(list)
+			if !ok || !isName(k) {
+				fail("app_domain %q: want KEY,NAME or KEY,[NAME,...] or KEY,$VAR", v)
+				continue
+			}
+			names, err := parseNames(list, vars)
+			if err != nil {
+				fail("app_domain: %v", err)
+				continue
+			}
+			r.appDomains = append(r.appDomains, appDomain{key: k, names: names})
+		case "allow":
+			detectOpts = append(detectOpts, o.key)
+			names, err := parseNames(v, vars)
+			if err != nil {
+				fail("allow: %v", err)
+				continue
+			}
+			r.allow = names
+		case "min_bytes":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, maxByteCount)
+			if err != nil {
+				fail("min_bytes: %v", err)
+				continue
+			}
+			r.minBytes = uint64(n)
+		case "min_ratio":
+			detectOpts = append(detectOpts, o.key)
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil || !(f >= 1 && f <= 1e6) {
+				fail("min_ratio %q: want a number from 1 to 1000000", v)
+				continue
+			}
+			r.ampRatio = f
+		case "min_entropy":
+			detectOpts = append(detectOpts, o.key)
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil || !(f >= 0 && f <= 8) {
+				fail("min_entropy %q: want bits per character, from 0 to 8", v)
+				continue
+			}
+			r.minEntropy = f
+		case "min_length":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, 253)
+			if err != nil {
+				fail("min_length: %v", err)
+				continue
+			}
+			r.minLength = n
+		case "regex":
+			k, re, err := parseRegex(v)
+			if err != nil {
+				fail("regex: %v", err)
+				continue
+			}
+			if k == DataKey {
+				r.dataRegex = append(r.dataRegex, re)
+			} else {
+				r.fieldRegex = append(r.fieldRegex, fieldRegex{key: k, re: re})
+			}
 		case "app_reason":
 			switch v {
 			case packet.ReasonMalformed, packet.ReasonSuspicious:
@@ -597,7 +673,7 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 			r.filter = &ws
 		case "detect":
 			if _, ok := detectorOptions[v]; !ok {
-				fail("detect %q: want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood, icmp_tunnel or slowloris", v)
+				fail("detect %q: want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood, icmp_tunnel, slowloris, dns_spoof, dns_amplification, dns_tunnel or dns_nxdomain_burst", v)
 				continue
 			}
 			r.Detect = v
@@ -927,8 +1003,60 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 		if !seen["min_remaining"] {
 			r.minRemaining = defaultSlowMinRemaining
 		}
+	case DetectDNSSpoof:
+		if kind == "" {
+			break // reported as missing
+		}
+		if !slices.Contains(spoofKinds, kind) {
+			fail("kind %q: want %s", kind, strings.Join(spoofKinds, ", "))
+			break
+		}
+		r.dnsKind = kind
+		counted := kind != SpoofQNameMismatch
+		if counted && (!seen["count"] || !seen["seconds"]) {
+			fail("detect:dns_spoof kind:%s needs count and seconds", kind)
+		}
+		if !counted && (seen["count"] || seen["seconds"]) {
+			fail("count and seconds are not valid with kind:%s (one mismatch is enough)", kind)
+		}
+		if kind == SpoofIDRace && r.detect.count > maxDistinct {
+			fail("kind:id_race count %d: at most %d", r.detect.count, maxDistinct)
+		}
+	case DetectDNSAmplification:
+		if !seen["min_ratio"] {
+			r.ampRatio = defaultAmpRatio
+		}
+	case DetectDNSTunnel:
+		if kind == "" {
+			break // reported as missing
+		}
+		if !slices.Contains(tunnelKinds, kind) {
+			fail("kind %q: want %s", kind, strings.Join(tunnelKinds, ", "))
+			break
+		}
+		r.dnsKind = kind
+		if kind == TunnelSubdomains {
+			if r.detect.count > maxDistinct {
+				fail("kind:subdomains count %d: at most %d", r.detect.count, maxDistinct)
+			}
+			if !seen["min_entropy"] {
+				r.minEntropy = defaultTunnelEntropy
+			}
+			if !seen["min_length"] {
+				r.minLength = defaultTunnelLength
+			}
+		} else if seen["min_entropy"] || seen["min_length"] {
+			fail("min_entropy and min_length are only valid with kind:subdomains")
+		}
+	case DetectNXDomainBurst:
+		if r.detect.count > maxDistinct {
+			fail("count %d: at most %d", r.detect.count, maxDistinct)
+		}
+		if !seen["min_entropy"] {
+			r.minEntropy = defaultNXEntropy
+		}
 	}
-	for _, k := range []string{"flags", "content", "app_proto", "app_field", "app_reason", "detection_filter",
+	for _, k := range []string{"flags", "content", "app_proto", "app_field", "app_reason", "app_content", "app_domain", "regex", "detection_filter",
 		"same_ip", "same_port", "eth_dst", "itype", "icode", "ttl", "arp_op", "dsize", "stream_anomaly"} {
 		if seenOption(opts, k) {
 			fail("option %s cannot be combined with detect", k)
@@ -937,14 +1065,25 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 	return sidSet
 }
 
+// parseNames parses a name list option value: $VAR, one name or
+// [name,...], with variables expanded.
+func parseNames(v string, vars varTable) ([]string, error) {
+	x, err := vars.expand(v, "name", nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseNameList(x)
+}
+
 func knownOption(k string) bool {
 	switch k {
 	case "msg", "sid", "rev", "severity", "category", "flags", "content", "nocase",
-		"app_proto", "app_field", "app_reason", "detection_filter", "detect",
+		"app_proto", "app_field", "app_reason", "app_content", "regex", "detection_filter", "detect",
 		"track", "count", "seconds", "min_incomplete_ratio", "max_distinct_ports",
 		"distinct_ports", "distinct_hosts", "same_ip", "same_port", "eth_dst", "itype",
 		"icode", "ttl", "kind", "scope", "min_samples", "max_hop_diff", "min_size", "arp_op",
-		"dsize", "metric", "max_reply_ratio", "stream_anomaly", "min_age", "min_rate", "min_remaining":
+		"dsize", "metric", "max_reply_ratio", "stream_anomaly", "min_age", "min_rate", "min_remaining",
+		"app_domain", "allow", "min_bytes", "min_ratio", "min_entropy", "min_length":
 		return true
 	}
 	return false
@@ -977,6 +1116,13 @@ var detectorOptions = map[string]struct{ required, optional []string }{
 	// min_remaining are valid with kind:slow_body only; parseOptions
 	// checks that.
 	DetectSlowloris: {required: []string{"kind", "track", "count"}, optional: []string{"seconds", "min_age", "min_rate", "min_remaining"}},
+	// count and seconds are required for unsolicited_response and
+	// id_race only; parseOptions checks that.
+	DetectDNSSpoof:         {required: []string{"kind"}, optional: []string{"count", "seconds"}},
+	DetectDNSAmplification: {required: []string{"min_bytes", "seconds"}, optional: []string{"min_ratio"}},
+	// min_entropy and min_length are valid with kind:subdomains only.
+	DetectDNSTunnel:     {required: []string{"kind", "count", "seconds"}, optional: []string{"min_entropy", "min_length", "allow"}},
+	DetectNXDomainBurst: {required: []string{"count", "seconds"}, optional: []string{"min_entropy"}},
 }
 
 // slowKinds lists the slowloris kinds.
@@ -986,7 +1132,8 @@ var slowKinds = []string{SlowHeaders, SlowBody, SlowRead}
 func detectorsTaking(k string) string {
 	var names []string
 	for _, d := range []string{DetectSYNFlood, DetectPortScan, DetectHostSweep, DetectPingSweep, DetectTTLAnomaly, DetectFragAttack, DetectARPSpoof,
-		DetectUDPFlood, DetectICMPFlood, DetectICMPTunnel, DetectSlowloris} {
+		DetectUDPFlood, DetectICMPFlood, DetectICMPTunnel, DetectSlowloris, DetectDNSSpoof, DetectDNSAmplification, DetectDNSTunnel,
+		DetectNXDomainBurst} {
 		spec := detectorOptions[d]
 		if slices.Contains(spec.required, k) || slices.Contains(spec.optional, k) {
 			names = append(names, d)
@@ -1037,6 +1184,10 @@ func checkProtoOptions(r *Rule, fail func(string, ...any)) {
 		if r.Proto != ProtoTCP {
 			fail("detect:%s requires protocol tcp", r.Detect)
 		}
+	case DetectDNSSpoof, DetectDNSAmplification, DetectDNSTunnel, DetectNXDomainBurst:
+		if r.Proto != ProtoIP && r.Proto != ProtoTCP && r.Proto != ProtoUDP {
+			fail("detect:%s requires protocol ip, tcp or udp", r.Detect)
+		}
 	}
 	if r.hasAnomaly && r.Proto != ProtoTCP && r.Proto != ProtoIP {
 		fail("stream_anomaly requires protocol tcp or ip")
@@ -1059,8 +1210,11 @@ func checkProtoOptions(r *Rule, fail func(string, ...any)) {
 	if r.filter != nil && r.Action == ActionPass {
 		fail("detection_filter cannot be used with a pass rule")
 	}
-	if (r.appProto != "" || len(r.appFields) > 0 || len(r.appReasons) > 0) && (r.Proto == ProtoICMP || r.Proto == ProtoARP) {
-		fail("app_proto, app_field and app_reason require protocol ip, tcp or udp")
+	if (r.appProto != "" || r.perMessage()) && (r.Proto == ProtoICMP || r.Proto == ProtoARP) {
+		fail("app_proto, app_field, app_reason, app_content and regex on a field require protocol ip, tcp or udp")
+	}
+	if len(r.dataRegex) > 0 && r.Proto == ProtoARP {
+		fail("regex:data requires an IP protocol (ip, tcp, udp or icmp)")
 	}
 }
 
@@ -1226,6 +1380,95 @@ func parseDetectionFilter(v string) (windowSpec, error) {
 		}
 	}
 	return ws, nil
+}
+
+// cutKeyQuoted splits `KEY,"..."[,rest]` into KEY, the quoted string
+// (with its quotes, escapes left as written) and rest (after the comma).
+func cutKeyQuoted(v string) (key, quoted, rest string, err error) {
+	k, tail, ok := strings.Cut(v, ",")
+	key, tail = strings.TrimSpace(k), strings.TrimSpace(tail)
+	if !ok || !strings.HasPrefix(tail, `"`) {
+		return "", "", "", fmt.Errorf("%q: want KEY,\"...\"", v)
+	}
+	if !isName(key) {
+		return "", "", "", fmt.Errorf("key %q: want letters, digits, '_' or '-'", key)
+	}
+	end := -1
+	for i := 1; i < len(tail); i++ {
+		if tail[i] == '\\' {
+			i++
+			continue
+		}
+		if tail[i] == '"' {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		return "", "", "", errors.New("unterminated quoted string")
+	}
+	quoted, rest = tail[:end+1], strings.TrimSpace(tail[end+1:])
+	if rest != "" {
+		if rest[0] != ',' {
+			return "", "", "", fmt.Errorf("unexpected %q after the string", rest)
+		}
+		rest = strings.TrimSpace(rest[1:])
+	}
+	return key, quoted, rest, nil
+}
+
+// parseAppContent parses KEY,"text"[,nocase]. text is decoded like a
+// content string.
+func parseAppContent(v string) (key, pat string, nocase bool, err error) {
+	key, quoted, rest, err := cutKeyQuoted(v)
+	if err != nil {
+		return "", "", false, err
+	}
+	switch rest {
+	case "":
+	case "nocase":
+		nocase = true
+	default:
+		return "", "", false, fmt.Errorf("%q: want nocase or nothing after the string", rest)
+	}
+	b, err := parseContent(quoted)
+	if err != nil {
+		return "", "", false, err
+	}
+	if len(b) == 0 {
+		return "", "", false, errors.New("empty string")
+	}
+	return key, string(b), nocase, nil
+}
+
+// parseRegex parses KEY,"pattern" and compiles pattern as Go (RE2)
+// syntax. Inside the quotes only \" and \; are escapes (for the rule
+// syntax); every other backslash is passed to the regex as written, so
+// \d, \( and \\ mean what they mean in RE2.
+func parseRegex(v string) (string, *regexp.Regexp, error) {
+	key, quoted, rest, err := cutKeyQuoted(v)
+	if err != nil {
+		return "", nil, err
+	}
+	if rest != "" {
+		return "", nil, fmt.Errorf("unexpected %q after the pattern (use (?i) for case-insensitive)", rest)
+	}
+	in := quoted[1 : len(quoted)-1]
+	var b strings.Builder
+	for i := 0; i < len(in); i++ {
+		if in[i] == '\\' && i+1 < len(in) && (in[i+1] == '"' || in[i+1] == ';') {
+			i++
+		}
+		b.WriteByte(in[i])
+	}
+	if b.Len() == 0 {
+		return "", nil, errors.New("empty pattern")
+	}
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		return "", nil, err
+	}
+	return key, re, nil
 }
 
 // unquote decodes a "..." string with the escapes \" \\ and \;.

@@ -55,8 +55,17 @@
 // sent FIN, after Config.IdleTimeout without packets, and, least recently
 // used first, when the memory charged to all flows passes
 // Config.MaxBytes. A flow whose buffers pass Config.MaxFlowBytes has its
-// buffers dropped and desyncs. Only a SYN or a segment with payload opens
-// a flow.
+// buffers dropped and desyncs.
+//
+// Only a segment with payload opens a flow. A SYN or SYN-ACK without
+// payload is only noted in a fixed-size handshake table (client side and
+// initial sequence numbers, 65536 entries, oldest reused first); the first
+// data segment of the connection opens the flow from that entry, in sync
+// from the start, with FlowStart set to the SYN's time. Bare ACKs, FINs
+// and RSTs of a connection without a flow open nothing, so a flood of
+// SYNs from spoofed sources costs no flows. A flow first seen through its
+// data, without a handshake in the table, takes the side on a port in the
+// set (or the lower port) as the server and starts desynced.
 //
 // All times are engine time: packet timestamps, never going backwards.
 package stream
@@ -269,14 +278,15 @@ type Reassembler struct {
 	tail   *flow
 	free   *flow
 	nextID uint64
-	mem    int // buffers of all flows
+	hs     handshakes // connections not carrying data yet
+	mem    int        // buffers of all flows
 	st     counters
 }
 
 // New returns a Reassembler for cfg.
 func New(cfg Config) *Reassembler {
 	cfg.setDefaults()
-	r := &Reassembler{cfg: cfg, flows: make(map[flowKey]*flow)}
+	r := &Reassembler{cfg: cfg, flows: make(map[flowKey]*flow), hs: newHandshakes(cfg.IdleTimeout)}
 	for port, proto := range cfg.Ports {
 		r.ports[port] = proto
 	}
@@ -322,7 +332,14 @@ func (r *Reassembler) Process(p *packet.ParsedPacket) {
 		f = nil
 	}
 	if f == nil {
-		if fl.RST || !fl.SYN && len(payload) == 0 {
+		if fl.RST {
+			r.hs.drop(key, r.now.UnixNano())
+			return
+		}
+		if len(payload) == 0 {
+			if fl.SYN {
+				r.handshake(key, fromA, p)
+			}
 			return
 		}
 		if f = r.open(key, fromA, p); f == nil {
@@ -412,15 +429,28 @@ func (r *Reassembler) isNewConnection(f *flow, fromA bool, seq uint32) bool {
 	return fromA != f.clientIsA || !h.sawSYN || h.isn != seq
 }
 
-// open starts tracking a flow, or returns nil if it should not be
-// tracked. The client is the SYN sender when there is a SYN; otherwise the
-// side not on a port in the set, or the side on the higher port.
+// open starts tracking a flow on its first segment with payload, or
+// returns nil if it should not be tracked. The client is the SYN sender
+// when the handshake table or this packet has a SYN; otherwise the side
+// not on a port in the set, or the side on the higher port.
 func (r *Reassembler) open(key flowKey, fromA bool, p *packet.ParsedPacket) *flow {
 	fl := p.TCPFlags
 	sp, dp := r.ports[p.SrcPort], r.ports[p.DstPort]
 	var clientIsSrc bool
 	var proto Proto
+	var hs pending
+	e := r.hs.get(key, r.now.UnixNano())
+	if e != nil {
+		hs, e.used = *e, false
+	}
 	switch {
+	case e != nil:
+		clientIsSrc = hs.clientIsA == fromA
+		if clientIsSrc {
+			proto = dp
+		} else {
+			proto = sp
+		}
 	case fl.SYN && !fl.ACK:
 		clientIsSrc, proto = true, dp
 	case fl.SYN:
@@ -444,6 +474,14 @@ func (r *Reassembler) open(key flowKey, fromA bool, p *packet.ParsedPacket) *flo
 	f.key, f.id, f.start, f.last, f.proto = key, r.nextID, r.now, r.now, proto
 	f.clientIsA = clientIsSrc == fromA
 	// Both directions start desynced; a SYN syncs its direction.
+	if e != nil {
+		f.start = time.Unix(0, hs.t)
+		for d := range f.half {
+			if hs.saw[d] {
+				f.half[d].syn(hs.isn[d])
+			}
+		}
+	}
 	r.flows[key] = f
 	r.pushFront(f)
 	r.mem += flowOverhead

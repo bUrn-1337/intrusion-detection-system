@@ -376,7 +376,9 @@ func TestSlowClosedFlows(t *testing.T) {
 		t.Fatalf("slow flows after port reuse %+v", s)
 	}
 	p = h.send(pkt{proto: "tcp", src: "10.9.9.9", dst: "10.0.0.80", sport: 1, dport: 80, flags: "S"}, 3*time.Minute)
-	if len(p.ClosedFlows) != 5 {
+	// The SYN that reused the 4-tuple carried no data, so it opened no
+	// flow: only the four remaining ones idle out.
+	if len(p.ClosedFlows) != 4 {
 		t.Fatalf("closed %v", p.ClosedFlows)
 	}
 	if s := h.e.Stats().Tables[TableSlowFlows]; s.Keys != 0 {

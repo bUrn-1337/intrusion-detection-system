@@ -1,0 +1,7 @@
+{
+  "description": "10.0.0.5 sends 70 queries of two random base32 labels (52 and 20 characters) under tunnel-test.example, answered NOERROR. dns_tunnel subdomains fires at 50 distinct subdomains with high entropy and length.",
+  "alerts": [
+    {"sid": 1000108, "kind": "alert", "src_ip": "10.0.0.5", "dst_ip": "192.0.2.53", "count": [1, 1], "details": {"kind": "subdomains", "registered_domain": "tunnel-test.example", "client": "10.0.0.5"}},
+    {"sid": 1000108, "kind": "summary", "count": [15, 21]}
+  ]
+}

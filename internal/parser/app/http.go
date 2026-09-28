@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
 )
@@ -34,7 +35,11 @@ var (
 	reasonBadHeaderLine    = "header line without a name"
 	reasonBadContentLen    = "invalid content-length"
 	reasonDoubleEncodedURI = "double percent-encoding"
+	reasonOverlongUTF8     = "overlong utf-8 encoding"
 )
+
+// maxHeadersRaw caps the headers_raw field.
+const maxHeadersRaw = 8 << 10
 
 // parseHTTP decodes an HTTP/1.x request or response head. It recognizes a
 // payload that starts with a known method and a space, "HTTP/1.", or the
@@ -153,10 +158,17 @@ func parseRequestLine(r *result, line []byte, terminated bool) bool {
 	}
 	uri := string(parts[1])
 	r.set("uri", uri)
-	decoded := percentDecode(uri)
+	decoded, overlong := decodeOverlong(percentDecode(uri))
 	r.set("uri_decoded", decoded)
+	if overlong {
+		r.flag(reasonOverlongUTF8)
+	}
 	if hidesTraversal(decoded) {
 		r.flag(reasonDoubleEncodedURI)
+	}
+	if _, q, ok := strings.Cut(uri, "?"); ok {
+		q, _, _ = strings.Cut(q, "#")
+		r.set("query", percentDecode(strings.ReplaceAll(q, "+", " ")))
 	}
 	if len(parts) == 3 {
 		v := validVersion(parts[2])
@@ -208,8 +220,27 @@ func parseStatusLine(r *result, line []byte, terminated bool) bool {
 }
 
 // parseHeaders decodes header lines up to the blank line or the end of the
-// segment. A partial last line is ignored.
+// segment. A partial last line is ignored. The lines it read are also kept
+// in headers_raw, joined by "\n" and cut at maxHeadersRaw bytes, with the
+// value of every Authorization and Proxy-Authorization header (and its
+// folded continuation lines) replaced by "<redacted>".
 func parseHeaders(r *result, b []byte) {
+	var raw []byte
+	defer func() {
+		if len(raw) > 0 {
+			r.set("headers_raw", string(raw))
+		}
+	}()
+	secret := false // the last header carries credentials
+	keep := func(line []byte) {
+		if len(raw) >= maxHeadersRaw {
+			return
+		}
+		if len(raw) > 0 {
+			raw = append(raw, '\n')
+		}
+		raw = append(raw, line[:min(len(line), maxHeadersRaw-len(raw))]...)
+	}
 	for count := 0; ; {
 		i := bytes.Index(b, crlf)
 		if i < 0 {
@@ -232,14 +263,25 @@ func parseHeaders(r *result, b []byte) {
 		line := b[:i]
 		b = b[i+len(crlf):]
 		if line[0] == ' ' || line[0] == '\t' {
+			if !secret {
+				keep(line)
+			}
 			continue // obsolete line folding
 		}
 		colon := bytes.IndexByte(line, ':')
 		if colon <= 0 {
+			// Not kept: without a name there is no telling whether it
+			// holds credentials.
 			r.bad(reasonBadHeaderLine)
 			return
 		}
 		name := strings.ToLower(string(bytes.TrimRight(line[:colon], " \t")))
+		secret = name == "authorization" || name == "proxy-authorization"
+		if secret {
+			keep(append(line[:colon:colon], ": <redacted>"...))
+		} else {
+			keep(line)
+		}
 		value := string(bytes.Trim(line[colon+1:], " \t"))
 		switch name {
 		case "host":
@@ -340,4 +382,56 @@ func unhex(c byte) (byte, bool) {
 		return c - 'A' + 10, true
 	}
 	return 0, false
+}
+
+// decodeOverlong replaces overlong UTF-8 sequences in s (a code point
+// encoded in more bytes than it needs, such as C0 AE or E0 80 AE for '.')
+// with the shortest encoding, and reports whether it found any. Such
+// sequences are invalid UTF-8 (RFC 3629) and only appear in attacks: old
+// decoders (IIS 4/5, the Tomcat CVE-2008-2938 connector) turned them into
+// "../" after the traversal filter had checked the path. Other bytes,
+// valid or not, are kept as they are.
+func decodeOverlong(s string) (string, bool) {
+	var b []byte
+	last := 0 // s[last:i] is not copied yet
+	for i := 0; i < len(s); {
+		r, n := overlongAt(s, i)
+		if n == 0 {
+			i++
+			continue
+		}
+		if b == nil {
+			b = make([]byte, 0, len(s))
+		}
+		b = append(b, s[last:i]...)
+		b = utf8.AppendRune(b, r)
+		i += n
+		last = i
+	}
+	if b == nil {
+		return s, false
+	}
+	return string(append(b, s[last:]...)), true
+}
+
+// overlongAt returns the code point of the overlong sequence at s[i] and
+// its length, or 0 length if there is none.
+func overlongAt(s string, i int) (rune, int) {
+	cont := func(k int) bool { return i+k < len(s) && s[i+k]&0xC0 == 0x80 }
+	c := s[i]
+	switch {
+	case c == 0xC0 || c == 0xC1: // 2 bytes for U+0000-U+007F
+		if cont(1) {
+			return rune(c&0x1F)<<6 | rune(s[i+1]&0x3F), 2
+		}
+	case c == 0xE0: // 3 bytes for U+0000-U+07FF: second byte below A0
+		if cont(1) && s[i+1] < 0xA0 && cont(2) {
+			return rune(s[i+1]&0x3F)<<6 | rune(s[i+2]&0x3F), 3
+		}
+	case c == 0xF0: // 4 bytes for U+0000-U+FFFF: second byte below 90
+		if cont(1) && s[i+1] < 0x90 && cont(2) && cont(3) {
+			return rune(s[i+1]&0x3F)<<12 | rune(s[i+2]&0x3F)<<6 | rune(s[i+3]&0x3F), 4
+		}
+	}
+	return 0, 0
 }

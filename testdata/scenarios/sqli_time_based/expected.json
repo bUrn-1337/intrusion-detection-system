@@ -1,0 +1,6 @@
+{
+  "description": "A request with id=7' AND SLEEP(5)-- - in the query string (percent-encoded). The time-based SQL injection rule fires once.",
+  "alerts": [
+    {"sid": 1000212, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "dst_port": 80, "count": [1, 1]}
+  ]
+}

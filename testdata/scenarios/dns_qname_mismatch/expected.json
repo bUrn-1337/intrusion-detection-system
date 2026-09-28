@@ -1,0 +1,6 @@
+{
+  "description": "10.0.0.5 asks for login.example.test; the answer has its id and port but the question evil.example.test. qname_mismatch fires once.",
+  "alerts": [
+    {"sid": 1000105, "kind": "alert", "src_ip": "192.0.2.53", "dst_ip": "10.0.0.5", "dst_port": 53001, "count": [1, 1], "details": {"kind": "qname_mismatch", "qname": "evil.example.test", "client_port": "53001"}}
+  ]
+}

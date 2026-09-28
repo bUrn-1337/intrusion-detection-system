@@ -1,0 +1,8 @@
+{
+  "description": "/static/%c0%ae%c0%ae/... uses overlong UTF-8 for '.', which the parser flags and decodes to ../. The overlong rule fires, and so do the traversal and /etc/passwd rules on the decoded URI.",
+  "alerts": [
+    {"sid": 1000217, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "dst_port": 80, "count": [1, 1]},
+    {"sid": 1000218, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "dst_port": 80, "count": [1, 1]},
+    {"sid": 1000223, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "dst_port": 80, "count": [1, 1]}
+  ]
+}

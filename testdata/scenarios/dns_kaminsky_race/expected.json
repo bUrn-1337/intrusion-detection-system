@@ -1,0 +1,9 @@
+{
+  "description": "10.0.0.53 asks 192.0.2.53 for www.bank.example.test. Before the real answer, 60 forged answers with guessed ids arrive within 300ms. id_race (critical) fires at the 10th distinct id; the forged answers are also unsolicited, so unsolicited_response fires too.",
+  "alerts": [
+    {"sid": 1000104, "kind": "alert", "src_ip": "192.0.2.53", "dst_ip": "10.0.0.53", "count": [1, 1], "details": {"kind": "id_race", "qname": "www.bank.example.test", "distinct_ids": "10"}},
+    {"sid": 1000104, "kind": "summary", "count": [40, 51]},
+    {"sid": 1000103, "kind": "alert", "src_ip": "192.0.2.53", "dst_ip": "10.0.0.53", "count": [1, 1]},
+    {"sid": 1000103, "kind": "summary", "count": [40, 51]}
+  ]
+}

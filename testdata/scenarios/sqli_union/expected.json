@@ -1,0 +1,6 @@
+{
+  "description": "After a normal page load, 203.0.113.9 requests /products.php?id=1 UNION SELECT username,password FROM users-- (percent-encoded). The UNION SELECT rule matches the decoded query once.",
+  "alerts": [
+    {"sid": 1000210, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "dst_port": 80, "count": [1, 1]}
+  ]
+}
