@@ -27,6 +27,7 @@ import (
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/lower"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/parser/upper"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/rules"
+	"github.com/bUrn-1337/intrusion-detection-system/internal/stream"
 )
 
 const (
@@ -42,6 +43,7 @@ type runOptions struct {
 	noTUI         bool
 	statsInterval time.Duration
 	pprof         string
+	stream        stream.Config
 }
 
 func runIDS(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -72,6 +74,18 @@ func runIDS(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opt.noTUI, "no-tui", false, "no dashboard: print alerts to stdout, one line each (automatic when stdout is not a terminal)")
 	fs.DurationVar(&opt.statsInterval, "stats-interval", time.Minute, "how often a stats record is logged")
 	fs.StringVar(&opt.pprof, "pprof", "", "serve net/http/pprof on `ADDR` for diagnostics; must be 127.0.0.1:PORT")
+	fs.Func("stream-ports", "TCP `PORT/PROTO` list the stream stage reassembles, PROTO one of http, dns, ftp, tls, or \"none\" (default 21/ftp,53/dns,80/http,443/tls,8000/http,8080/http,8443/tls)", func(v string) (err error) {
+		opt.stream.Ports, err = parseStreamPorts(v)
+		return err
+	})
+	fs.Func("stream-max-mem", "memory `SIZE` for TCP reassembly over all flows; least recently used flows are dropped beyond it (default 64M)", func(v string) error {
+		n, err := parseSize(v)
+		if err == nil && n > 1<<40 {
+			err = fmt.Errorf("bad size %q (at most 1T)", v)
+		}
+		opt.stream.MaxBytes = int(n)
+		return err
+	})
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -108,6 +122,25 @@ func runIDS(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// parseStreamPorts parses -stream-ports: "none", or comma-separated
+// PORT/PROTO items such as "80/http,5353/dns".
+func parseStreamPorts(v string) (map[uint16]stream.Proto, error) {
+	ports := map[uint16]stream.Proto{}
+	if strings.TrimSpace(v) == "none" {
+		return ports, nil
+	}
+	for _, item := range strings.Split(v, ",") {
+		ps, name, ok := strings.Cut(strings.TrimSpace(item), "/")
+		port, err := strconv.ParseUint(ps, 10, 16)
+		proto, known := stream.ParseProto(strings.ToUpper(name))
+		if !ok || err != nil || port == 0 || !known {
+			return nil, fmt.Errorf("bad stream port %q (want PORT/PROTO, PROTO one of http, dns, ftp, tls)", item)
+		}
+		ports[uint16(port)] = proto
+	}
+	return ports, nil
 }
 
 // parseSize parses a byte count with an optional K, M or G suffix (powers
@@ -186,6 +219,7 @@ type ids struct {
 	stderr io.Writer
 
 	cap    *capture.Capturer
+	stream *stream.Reassembler
 	eng    *rules.Engine
 	log    *logging.Writer
 	agg    *logging.Aggregator
@@ -223,7 +257,7 @@ func runPipeline(ctx context.Context, opt runOptions, stdout, stderr io.Writer) 
 
 	d := &ids{
 		opt: opt, stdout: stdout, stderr: stderr,
-		cap: c, eng: rules.NewEngine(rs, rules.EngineConfig{Whitelist: opt.whitelist}), log: w,
+		cap: c, stream: stream.New(opt.stream), eng: rules.NewEngine(rs, rules.EngineConfig{Whitelist: opt.whitelist}), log: w,
 		start: time.Now(), reloadReq: make(chan struct{}, 1),
 	}
 	d.agg = logging.NewAggregator(logging.AggregatorConfig{}, d.start)
@@ -300,6 +334,7 @@ func (d *ids) pipeline(pkts <-chan *packet.ParsedPacket) {
 			}
 			lower.Parse(p)
 			upper.Parse(p)
+			d.stream.Process(p)
 			app.Parse(p)
 			d.agg.Packet(p)
 			d.emit(d.eng.Process(p))
@@ -341,6 +376,7 @@ func (d *ids) statsRecord(now time.Time, reason string) logging.StatsRecord {
 		Time: now, Reason: reason, Uptime: now.Sub(d.start).Seconds(), Source: d.source,
 		Capture: logging.CaptureStats{Captured: cs.Captured, KernelDropped: cs.KernelDropped, QueueDropped: cs.QueueDropped, QueueDepth: cs.QueueDepth},
 		Engine:  logging.EngineStatsFrom(d.eng.Stats()),
+		Stream:  logging.StreamStatsFrom(d.stream.Stats()),
 		Traffic: d.agg.Totals(),
 		Log:     d.log.Stats(),
 	}
@@ -350,8 +386,11 @@ func (d *ids) printFinal() {
 	cs := d.cap.Stats()
 	es := d.eng.Stats()
 	ls := d.log.Stats()
+	ss := d.stream.Stats()
 	fmt.Fprintf(d.stderr, "ids: captured=%d kernel_dropped=%d queue_dropped=%d rules=%d packets=%d alerts=%d summaries=%d log_written=%d log_dropped=%d\n",
 		cs.Captured, cs.KernelDropped, cs.QueueDropped, es.Rules, es.Packets, es.Alerts, es.Summaries, ls.Written, ls.Dropped)
+	fmt.Fprintf(d.stderr, "ids: stream flows=%d messages=%d evictions=%d gaps=%d desyncs=%d resyncs=%d overlap_conflicts=%d oversize_headers=%d ooo_overflows=%d cap_drops=%d buffered_peak=%d\n",
+		ss.FlowsTotal, ss.Messages, ss.Evictions, ss.Gaps, ss.Desyncs, ss.Resyncs, ss.OverlapConflicts, ss.OversizeHeaders, ss.OOOOverflows, ss.CapDrops, ss.BufferedPeak)
 }
 
 func (d *ids) getHeader() tui.Header {
@@ -362,9 +401,12 @@ func (d *ids) getHeader() tui.Header {
 
 func (d *ids) health() tui.Health {
 	cs := d.cap.Stats()
+	ss := d.stream.Stats()
 	return tui.Health{
 		Captured: cs.Captured, KernelDropped: cs.KernelDropped, QueueDropped: cs.QueueDropped,
 		QueueDepth: cs.QueueDepth, LogDropped: d.log.Stats().Dropped,
+		StreamFlows: ss.Flows, StreamBuffered: ss.Buffered, StreamEvictions: ss.Evictions,
+		StreamGaps: ss.Gaps, StreamDesyncs: ss.Desyncs, StreamOverlaps: ss.OverlapConflicts,
 	}
 }
 

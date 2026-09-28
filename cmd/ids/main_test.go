@@ -15,6 +15,8 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcapgo"
+
+	"github.com/bUrn-1337/intrusion-detection-system/internal/stream"
 )
 
 var t0 = time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
@@ -259,6 +261,8 @@ func TestRunErrors(t *testing.T) {
 		{"log unwritable", []string{"-r", pcap, "-rules", rulesPath(t), "-log", filepath.Join(roDir, "a.jsonl")}, 1, []string{"cannot open alert log", "permission denied"}},
 		{"log is a directory", []string{"-r", pcap, "-rules", rulesPath(t), "-log", dir}, 1, []string{"cannot open alert log", "is a directory"}},
 		{"bad size", []string{"-r", pcap, "-log-max-size", "lots"}, 2, []string{"bad size"}},
+		{"bad stream port", []string{"-r", pcap, "-stream-ports", "80/http,443/ssh"}, 2, []string{"bad stream port"}},
+		{"bad stream mem", []string{"-r", pcap, "-stream-max-mem", "2048G"}, 2, []string{"at most 1T"}},
 		{"bad whitelist", []string{"-r", pcap, "-whitelist", "10.0.0.0/8,nope"}, 2, []string{"bad whitelist"}},
 		{"unknown subcommand", []string{"frobnicate"}, 2, []string{"unknown subcommand"}},
 	}
@@ -302,6 +306,27 @@ func TestParseSize(t *testing.T) {
 	for _, in := range []string{"", "0", "-5", "M", "12X", "99999999999G"} {
 		if _, err := parseSize(in); err == nil {
 			t.Errorf("parseSize(%q) accepted", in)
+		}
+	}
+}
+
+func TestParseStreamPorts(t *testing.T) {
+	got, err := parseStreamPorts(" 80/http, 5353/DNS,990/ftp,4443/tls")
+	want := map[uint16]stream.Proto{80: stream.HTTP, 5353: stream.DNS, 990: stream.FTP, 4443: stream.TLS}
+	if err != nil || len(got) != len(want) {
+		t.Fatalf("got %v, %v", got, err)
+	}
+	for port, p := range want {
+		if got[port] != p {
+			t.Errorf("port %d: %v, want %v", port, got[port], p)
+		}
+	}
+	if got, err := parseStreamPorts("none"); err != nil || got == nil || len(got) != 0 {
+		t.Errorf("none: %v, %v (want an empty non-nil map)", got, err)
+	}
+	for _, in := range []string{"", "80", "80/", "/http", "0/http", "65536/http", "80/smtp", "80/http,"} {
+		if _, err := parseStreamPorts(in); err == nil {
+			t.Errorf("parseStreamPorts(%q) accepted", in)
 		}
 	}
 }

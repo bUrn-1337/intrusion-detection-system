@@ -160,6 +160,14 @@ hex bytes and `\|` a literal bar. It is repeatable, and all contents must
 match. `nocase;` makes the content just before it case-insensitive (ASCII
 only).
 
+On a TCP flow the stream stage reassembles (see `app_proto` below), the
+contents may instead all match the messages that the packet completed:
+the whole HTTP head, DNS message, FTP line or TLS ClientHello, however
+the sender split it. All contents must match in one of the two, the
+payload or the messages. A content-only rule can therefore match both
+the segment that carries a string and the one that completes its
+message; dedup folds the second into the summary.
+
 ```
 alert tcp any any -> any 80 (msg:"cmd.exe in HTTP"; content:"cmd.exe"; nocase; sid:1000911;)
 alert tcp any any -> any 25 (msg:"SMTP line ending then DATA"; content:"|0d 0a|DATA"; sid:1000912;)
@@ -250,6 +258,18 @@ alert udp any any -> any 53 (msg:"Large DNS query"; dsize:512<>65535; sid:100092
 
 These match what the application parser (Module 4) decoded.
 
+On TCP ports 21 (FTP), 53 (DNS), 80, 8000 and 8080 (HTTP) and 443 and
+8443 (TLS) (`-stream-ports` changes the set), the stream stage
+reassembles each message first, so the parser sees whole HTTP heads, DNS
+messages, FTP lines and TLS ClientHellos. The packet that completes a
+message carries it; the packets before it carry no fields at all (they
+are not malformed). A packet can complete several messages (HTTP
+pipelining, several DNS messages or FTP lines in one segment): all
+`app_field` and `app_reason` options of a rule must then be satisfied by
+one of them. A flow the stream stage cannot follow (picked up mid-stream
+and not yet at a message boundary, or after a gap) is parsed one segment
+at a time, as on other ports.
+
 - `app_proto:dns|http|ftp|tls;`: the parser recognized that protocol.
 - `app_field:KEY=VALUE;`: field KEY equals VALUE, ignoring case. VALUE may
   be quoted. Repeatable.
@@ -277,6 +297,26 @@ or NUL byte; double encoding alone is not flagged), `long high-entropy label (po
 backwards`, `query has no questions` and `invalid request line`
 (malformed). `app_reason` matches the kind only; the text is for people. Credentials are never stored: the HTTP
 `Authorization` header only sets `auth_basic=true`.
+
+### stream_anomaly
+
+`stream_anomaly;` matches a packet on which the stream stage saw an
+anomaly; `stream_anomaly:REASON;` only that one. Valid on `tcp` and `ip`
+rules.
+
+| reason | the packet |
+|---|---|
+| `overlap_conflict` | retransmits bytes the stream already holds (the message in progress or the last one delivered) with different content. TCP stacks never do this; an attacker does, so that the IDS and the server each keep a different copy (Ptacek and Newsham, 1998). The message in progress is dropped and the direction resyncs at the next message start. Overlaps with bytes no longer held (skipped bodies, older messages) are not seen. |
+| `oversize_headers` | makes an HTTP head longer than 16 KiB without its blank line |
+| `too_many_ooo_segments` | is a 17th out-of-order segment waiting behind one gap in the same direction |
+
+After an anomaly the direction is parsed one segment at a time until a
+segment starts a new message, so the packet that carried it is parsed on
+its own.
+
+```
+alert tcp any any -> any any (msg:"TCP overlap with different data"; stream_anomaly:overlap_conflict; sid:1000501; severity:high; category:evasion;)
+```
 
 ### detection_filter
 
@@ -613,7 +653,47 @@ Details: `detector`, `client`, `server`, `payloads`, `distinct_sizes`,
 fired), `payload_len`, `seconds`, `window`, `min_sizes` and
 `min_entropy_bits`. Alerts are deduplicated per (sid, client, server).
 
-Detector rules cannot use `flags`, `content`, `app_*`,
+### detect:slowloris
+
+Slow HTTP denial of service: many connections each held open by a
+request that never finishes. It needs the stream stage, which tracks
+the HTTP state of each connection on the HTTP ports (80, 8000 and 8080
+by default). Valid on `tcp` alert rules. `kind`, `track:by_src|by_dst`
+and `count:N` are required. A connection qualifies while:
+
+| kind | the connection | options (default) |
+|---|---|---|
+| `slow_headers` | has a request head in progress for more than `min_age`, and the client sent data within the last `seconds` | `min_age:10; seconds:30;` |
+| `slow_body` | has a request body in progress for more than `min_age` (counted from the start of the head), with more than `min_remaining` bytes of its Content-Length still to come, data within `seconds`, and fewer than `min_rate` bytes per second received on average | `min_age:20; seconds:30; min_rate:100; min_remaining:10240;` |
+| `slow_read` | has had a zero TCP window from the client for more than `min_age` | `min_age:20;` |
+
+`min_age` and `seconds` are in seconds. `seconds` does not apply to
+`slow_read`, and `min_rate` and `min_remaining` apply only to
+`slow_body`. The rule fires when `count` qualifying connections share
+the tracked address (the client for `by_src`, the server for `by_dst`),
+then once for every further connection that qualifies. A connection
+stops counting when it closes (FIN, RST, or 2 minutes without packets),
+when its request completes, when its window opens, or when it stops
+qualifying.
+
+A browser's idle keep-alive connections have no request in progress and
+never count, however many there are. Connections whose chunked or
+unknown-length body is in progress do not count for `slow_body`. The
+table holds at most 50000 connections, dropping the least recently
+active; conditions are re-checked on every packet and when the engine
+is flushed, so a connection can qualify while it sends nothing.
+
+```
+alert tcp any any -> any any (msg:"Slowloris"; detect:slowloris; kind:slow_headers; track:by_src; count:20; sid:1000030;)
+alert tcp any any -> any any (msg:"R-U-Dead-Yet"; detect:slowloris; kind:slow_body; track:by_src; count:10; sid:1000032;)
+```
+
+Details: `detector`, `kind`, `track`, `tracked_addr`, `flows`, `count`,
+`oldest_age`, `min_age`, `targets` (up to 5 server `ip:port`),
+`distinct_targets`, `clients`, `sample_flow_ids` (up to 5), and
+`seconds`, `min_rate` and `min_remaining` where they apply.
+
+Detector rules cannot use `flags`, `content`, `app_*`, `stream_anomaly`,
 `detection_filter`, `same_ip`, `same_port`, `eth_dst`, `itype`, `icode`,
 `ttl`, `arp_op` or `dsize`.
 

@@ -27,7 +27,8 @@ var T0 = time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 // any other type and code (the 4 bytes after the checksum are zero unless
 // it is an echo). An echo request or reply (ICMP 8/0, ICMPv6 128/129)
 // carries the identifier and sequence number in Echo, default 1 and 1,
-// followed by Payload. Flags are TCP flag letters from "SAFRPU".
+// followed by Payload. Flags are TCP flag letters from "SAFRPU". A TCP
+// segment advertises a 64240-byte window unless ZeroWindow is set.
 type Pkt struct {
 	Proto        string
 	Src, Dst     string
@@ -41,6 +42,7 @@ type Pkt struct {
 	TTL          uint8            // IPv4 TTL or IPv6 hop limit; 0 means 64
 	EthDst       net.HardwareAddr // nil means 02:00:00:00:00:02
 	EthSrc       net.HardwareAddr // nil means 02:00:00:00:00:01
+	ZeroWindow   bool             // TCP window 0
 }
 
 // Broadcast is the Ethernet broadcast address, for Pkt.EthDst.
@@ -98,6 +100,9 @@ func (p Pkt) Bytes(tb testing.TB) []byte {
 	switch p.Proto {
 	case "tcp":
 		tcp := &layers.TCP{SrcPort: layers.TCPPort(p.Sport), DstPort: layers.TCPPort(p.Dport), Seq: p.Seq, Ack: p.Ack, Window: 64240}
+		if p.ZeroWindow {
+			tcp.Window = 0
+		}
 		for _, c := range p.Flags {
 			switch c {
 			case 'S':
@@ -391,6 +396,67 @@ func (c *Conn) Send(fromClient bool, payload []byte) {
 	c.w.Add(Pkt{Proto: "tcp", Src: c.Server, Dst: c.Client, Sport: c.SPort, Dport: c.CPort, TTL: c.ServerTTL, Flags: "PA", Seq: c.sseq, Ack: c.cseq, Payload: payload})
 	c.sseq += uint32(len(payload))
 	c.w.Add(Pkt{Proto: "tcp", Src: c.Client, Dst: c.Server, Sport: c.CPort, Dport: c.SPort, Flags: "A", Seq: c.cseq, Ack: c.sseq})
+}
+
+// SetISN sets the initial sequence numbers of both directions (default
+// 1000 and 5000), before Handshake. The first data byte follows at ISN+1.
+func (c *Conn) SetISN(client, server uint32) { c.cseq, c.sseq = client, server }
+
+// pkt is a segment of the connection with its own sequence number and
+// the current acknowledgment of the peer's data.
+func (c *Conn) pkt(fromClient bool, flags string, payload []byte) Pkt {
+	if fromClient {
+		return Pkt{Proto: "tcp", Src: c.Client, Dst: c.Server, Sport: c.CPort, Dport: c.SPort, Flags: flags, Seq: c.cseq, Ack: c.sseq, Payload: payload}
+	}
+	return Pkt{Proto: "tcp", Src: c.Server, Dst: c.Client, Sport: c.SPort, Dport: c.CPort, TTL: c.ServerTTL, Flags: flags, Seq: c.sseq, Ack: c.cseq, Payload: payload}
+}
+
+// Seg writes one data segment that starts off bytes after the sender's
+// next sequence number (negative for a retransmission), without an ACK
+// and without advancing the sequence number: with Advance, it writes
+// segments out of order, retransmitted or overlapping.
+func (c *Conn) Seg(fromClient bool, off int, payload []byte) {
+	c.w.tb.Helper()
+	p := c.pkt(fromClient, "PA", payload)
+	p.Seq += uint32(off)
+	c.w.Add(p)
+}
+
+// Advance moves the sender's next sequence number n bytes on (after the
+// segments written with Seg) and writes the peer's ACK.
+func (c *Conn) Advance(fromClient bool, n int) {
+	c.w.tb.Helper()
+	if fromClient {
+		c.cseq += uint32(n)
+	} else {
+		c.sseq += uint32(n)
+	}
+	c.Ack(!fromClient, false)
+}
+
+// Push writes a data segment without the peer's ACK.
+func (c *Conn) Push(fromClient bool, payload []byte) {
+	c.w.tb.Helper()
+	c.Seg(fromClient, 0, payload)
+	if fromClient {
+		c.cseq += uint32(len(payload))
+	} else {
+		c.sseq += uint32(len(payload))
+	}
+}
+
+// Ack writes a bare ACK, advertising a zero window if zeroWindow.
+func (c *Conn) Ack(fromClient, zeroWindow bool) {
+	c.w.tb.Helper()
+	p := c.pkt(fromClient, "A", nil)
+	p.ZeroWindow = zeroWindow
+	c.w.Add(p)
+}
+
+// Reset writes a RST/ACK.
+func (c *Conn) Reset(fromClient bool) {
+	c.w.tb.Helper()
+	c.w.Add(c.pkt(fromClient, "RA", nil))
 }
 
 // Close writes a FIN exchange started by the client.

@@ -1,0 +1,8 @@
+{
+  "description": "An AXFR query over TCP whose first segment is one byte of the 2-byte length prefix. Parsed per segment it was not DNS at all; reassembled, the zone transfer request alerts once and the REFUSED response does not.",
+  "alerts": [
+    {"sid": 1000101, "kind": "alert", "src_ip": "10.0.0.5", "dst_ip": "192.0.2.53", "dst_port": 53, "count": [1, 1]}
+  ],
+  "absent_sids": [1000102],
+  "stream_stats": {"overlap_conflicts": [0, 0], "desyncs": [0, 0], "flows": [0, 0], "messages": [2, 2]}
+}

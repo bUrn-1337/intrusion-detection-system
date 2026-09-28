@@ -1,0 +1,9 @@
+{
+  "description": "25 attackers each hold one slow-headers connection to the same server. No source reaches the per-source count; the per-server rule alerts once 20 connections qualify, and the summary counts all 25.",
+  "alerts": [
+    {"sid": 1000031, "kind": "alert", "dst_ip": "192.0.2.80", "count": [1, 1], "details": {"kind": "slow_headers", "track": "by_dst", "tracked_addr": "192.0.2.80", "flows": "20", "clients": "20"}},
+    {"sid": 1000031, "kind": "summary", "dst_ip": "192.0.2.80", "count": [6, 6]}
+  ],
+  "absent_sids": [1000030],
+  "stream_stats": {"messages": [0, 0]}
+}

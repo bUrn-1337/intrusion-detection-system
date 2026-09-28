@@ -1,0 +1,9 @@
+{
+  "description": "A path traversal request (double-encoded, with Basic auth) sent in three segments cut inside '%25' and inside the Authorization header. Only the reassembled head shows the suspicious URI and the credentials; each alerts once, on the segment that completes the head.",
+  "alerts": [
+    {"sid": 1000202, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "src_port": 43000, "dst_port": 80, "count": [1, 1]},
+    {"sid": 1000201, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "src_port": 43000, "dst_port": 80, "count": [1, 1]}
+  ],
+  "log_must_not_contain": ["YWRtaW46aHVudGVyMg==", "hunter2"],
+  "stream_stats": {"overlap_conflicts": [0, 0], "desyncs": [0, 0], "flows": [0, 0], "messages": [2, 2]}
+}

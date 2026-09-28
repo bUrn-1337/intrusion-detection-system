@@ -4,8 +4,9 @@
 // ParsedPacket is the ONLY contract between pipeline stages. Each field is
 // written by exactly one stage (documented per field below) and may be read
 // by any later stage. The exceptions are ParseErrors, which any stage may
-// append to through AddError, and the reason keys in AppFields, which are
-// only written through AddAppReason.
+// append to through AddError; the reason keys in AppFields, which are only
+// written through AddAppReason; and the "http_*" keys in AppFields, which
+// the stream stage writes before Module 4 adds its own.
 //
 // Every module depends on the exact shape of this struct. No stage may add,
 // remove, or change a field without updating this file and notifying the
@@ -39,6 +40,19 @@ const (
 	L4UDP   = "UDP"
 	L4ICMP  = "ICMP"
 	L4Other = "OTHER"
+)
+
+// Values for ParsedPacket.StreamAnomaly. The empty string means none.
+const (
+	// StreamOverlapConflict: the segment overlaps bytes already seen in
+	// its direction with different content.
+	StreamOverlapConflict = "overlap_conflict"
+	// StreamOversizeHeaders: an HTTP message head grew past the stream
+	// stage's header cap without ending.
+	StreamOversizeHeaders = "oversize_headers"
+	// StreamTooManyOOO: more out-of-order segments arrived ahead of a gap
+	// than the stream stage holds.
+	StreamTooManyOOO = "too_many_ooo_segments"
 )
 
 // Values for ParsedPacket.L4ChecksumStatus.
@@ -75,7 +89,8 @@ type TCPFlags struct {
 
 // ParsedPacket is one captured frame, filled in stage by stage as it moves
 // through the pipeline. Stages identify themselves by module number:
-// 1 capture, 2 parser/lower, 3 parser/upper, 4 parser/app.
+// 1 capture, 2 parser/lower, 3 parser/upper, stream (TCP reassembly,
+// between 3 and 4), 4 parser/app.
 type ParsedPacket struct {
 	// ---- Module 1: capture ----
 
@@ -269,10 +284,58 @@ type ParsedPacket struct {
 	// recorded in ParseErrors.
 	L4ChecksumStatus uint8
 
+	// ---- Stream: TCP reassembly (internal/stream) ----
+	//
+	// The stream stage tracks TCP flows with a port in its set (by
+	// default 21, 53, 80, 443, 8000, 8080 and 8443) and leaves every other
+	// packet untouched, with all of these fields at their zero values.
+
+	// FlowID identifies the tracked TCP flow this packet belongs to, in
+	// both directions. IDs are never reused within a run. It is 0 for a
+	// packet the stream stage does not track (another protocol or port,
+	// or a segment that opens no flow: a RST, or a bare ACK or FIN of a
+	// flow it does not know).
+	FlowID uint64
+	// FlowStart is the engine time (packet time, never going backwards)
+	// of the flow's first packet. It is zero when FlowID is 0.
+	FlowStart time.Time
+	// StreamProto is AppHTTP, AppDNS, AppFTP or AppTLS when the stream
+	// stage is reassembling this packet's direction of the flow, and ""
+	// otherwise: the flow is not tracked, the direction is desynced
+	// (waiting for a clean message boundary), or it has been handed back
+	// to per-segment parsing (TLS after its first handshake record, HTTP
+	// after an upgrade). When it is set, the payload belongs to the
+	// reassembled stream: Module 4 parses only AppData and never this
+	// segment's payload on its own.
+	StreamProto string
+	// AppData holds the application messages this packet completed, as an
+	// owned copy, in stream order: whole HTTP message heads (request or
+	// status line and headers up to the blank line, without bodies),
+	// DNS-over-TCP messages with their 2-byte length prefix, FTP lines
+	// with their line ending, or the first TLS record of a direction. It
+	// may hold several messages (pipelined HTTP requests, several DNS
+	// messages or FTP lines). It is nil when the packet completed none,
+	// including every packet with StreamProto "". Later stages must not
+	// modify it.
+	AppData []byte
+	// StreamAnomaly is one of the Stream* reason constants, or "". It is
+	// set on the packet where the stream stage saw the anomaly; the
+	// direction's buffered message is dropped and it waits for a clean
+	// boundary.
+	StreamAnomaly string
+	// ClosedFlows lists the FlowIDs the stream stage stopped tracking
+	// while it processed this packet: this packet's own flow on a RST or
+	// after both sides sent FIN, and other flows that timed out idle or
+	// were evicted at the memory cap. Later stages drop any state they
+	// keep per FlowID for them. It is nil when none closed.
+	ClosedFlows []uint64
+
 	// ---- Module 4: HTTP / DNS / FTP / TLS ----
 
 	// AppProtocol is one of AppHTTP, AppDNS, AppFTP, AppTLS or AppUnknown,
-	// or "" if Module 4 has not run.
+	// or "" if Module 4 has not run or had nothing to parse (no payload).
+	// A packet whose StreamProto is set but that completed no message
+	// gets AppProtocol = StreamProto and no fields.
 	AppProtocol string
 	// AppFields holds protocol-specific values. It is nil until something is
 	// written. Write it only through SetAppField and AddAppReason, which
@@ -286,7 +349,21 @@ type ParsedPacket struct {
 	//         "content_length", "auth_basic" ("true" if an
 	//         Authorization: Basic header is present), "request_complete"
 	//         ("true" if the blank line ending the headers is in this
-	//         segment; set for requests and responses)
+	//         segment, and always for a message from AppData; set for
+	//         requests and responses)
+	//         HTTP state, written by the stream stage (not Module 4) on
+	//         every client-to-server packet of a reassembled HTTP flow,
+	//         before Module 4 runs: "http_state" ("headers_partial": a
+	//         request head has started and not ended; "headers_complete":
+	//         this packet completed a request with no body to follow;
+	//         "body_partial": a request head is complete and its body is
+	//         not; "idle": no request in progress), "http_hdr_bytes"
+	//         (bytes of the current request head so far), and while a
+	//         body is in progress "http_body_expected" (Content-Length;
+	//         absent for chunked bodies) and "http_body_seen" (body bytes
+	//         received so far), and "http_msg_start" (engine time the
+	//         current request started, in Unix nanoseconds; absent when
+	//         idle)
 	//   DNS:  "id", "qname" (first question, lowercased), "qtype"
 	//         (number), "qtype_name" ("A", "AAAA", ... for common types),
 	//         "qclass", "is_response", "rcode", "qdcount", "ancount",
@@ -296,7 +373,8 @@ type ParsedPacket struct {
 	//   TLS:  "sni" (ClientHello server name, lowercased; no decryption),
 	//         "sni_status" ("found", "absent" for a complete ClientHello
 	//         without one, or "truncated" when the ClientHello continues
-	//         past this segment and no server name was seen)
+	//         past the parsed bytes, this segment or the record in
+	//         AppData, and no server name was seen)
 	//   All:  "malformed_reason", "suspicious_reason". Write these only
 	//         through AddAppReason, never through SetAppField.
 	//
@@ -306,7 +384,15 @@ type ParsedPacket struct {
 	// not quote payload bytes.
 	//
 	// Add a new key here before any module starts writing it.
+	//
+	// When AppData holds several messages, AppFields describes the first
+	// one and AppMore the others.
 	AppFields map[string]string
+	// AppMore holds the fields of the second and later messages in
+	// AppData, one map per message, in order, with the same keys as
+	// AppFields (the reason keys included). It is nil for a packet with
+	// at most one message. Written only by Module 4.
+	AppMore []map[string]string
 
 	// ---- Any stage ----
 

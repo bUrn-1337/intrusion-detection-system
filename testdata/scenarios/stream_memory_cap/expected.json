@@ -1,0 +1,10 @@
+{
+  "description": "With -stream-max-mem 1M, 4000 clients each leave a request head half sent. The least recently used flows are evicted to stay under the cap, and a traversal request split in two on a new flow is still reassembled and alerts.",
+  "args": ["-stream-max-mem", "1M"],
+  "alerts": [
+    {"sid": 1000202, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "src_port": 43007, "dst_port": 80, "count": [1, 1]},
+    {"sid": 1000201, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "src_port": 43007, "dst_port": 80, "count": [1, 1]}
+  ],
+  "log_must_not_contain": ["YWRtaW46aHVudGVyMg==", "hunter2"],
+  "stream_stats": {"evictions": [2000, 3999], "flows_total": [4001, 4001], "flows": [1, 1100]}
+}

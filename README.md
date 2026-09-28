@@ -83,6 +83,7 @@ make test    # go test ./...
 make lint    # go vet + staticcheck (if installed)
 make scenarios            # every testdata/scenarios case through ids run
 make fuzz FUZZTIME=2m     # fuzz the whole pipeline (default 30s)
+make fuzz FUZZ=FuzzStream # fuzz TCP reassembly with segmented scenario traffic
 make run ARGS="-i eth0"   # bin/ids run with ARGS, without rebuilding
 ```
 

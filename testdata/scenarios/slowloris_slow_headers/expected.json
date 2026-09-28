@@ -1,0 +1,9 @@
+{
+  "description": "One attacker opens 30 connections over two servers (15 each) and sends one more header line on each every 5 s for 40 s, never finishing a request. Once 20 are more than 10 s old the per-source rule alerts; the 10 that qualify after it are counted in the summary. Neither server reaches 20, so the per-server rule stays quiet.",
+  "alerts": [
+    {"sid": 1000030, "kind": "alert", "src_ip": "203.0.113.50", "count": [1, 1], "details": {"kind": "slow_headers", "track": "by_src", "tracked_addr": "203.0.113.50", "flows": "20", "distinct_targets": "2"}},
+    {"sid": 1000030, "kind": "summary", "src_ip": "203.0.113.50", "count": [11, 11]}
+  ],
+  "absent_sids": [1000031],
+  "stream_stats": {"messages": [0, 0], "closed": [30, 30]}
+}

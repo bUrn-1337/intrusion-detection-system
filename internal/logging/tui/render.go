@@ -28,7 +28,7 @@ type Header struct {
 	Done bool
 }
 
-// Health is capture and logging health.
+// Health is capture, reassembly and logging health.
 type Health struct {
 	Captured      uint64
 	KernelDropped uint64
@@ -36,6 +36,13 @@ type Health struct {
 	QueueDepth    int
 	LogDropped    uint64 // log records dropped by the log writer
 	FeedDropped   uint64 // alerts the dashboard feed dropped
+	// TCP reassembly (stream.Stats).
+	StreamFlows     int64  // flows tracked now
+	StreamBuffered  int64  // bytes buffered now
+	StreamEvictions uint64 // flows dropped at the memory cap
+	StreamGaps      uint64
+	StreamDesyncs   uint64
+	StreamOverlaps  uint64 // overlap conflicts
 }
 
 // Model is everything the dashboard shows.
@@ -82,7 +89,7 @@ func NewView() *View {
 		AddItem(v.alerting, 0, 2, false)
 	v.Root = tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(v.header, 4, 0, false).
-		AddItem(row1, 10, 0, false).
+		AddItem(row1, 12, 0, false).
 		AddItem(row2, 13, 0, false).
 		AddItem(v.alerts, 0, 1, false)
 	return v
@@ -143,11 +150,15 @@ func RenderTraffic(m *Model) string {
 }
 
 // RenderHealth renders the capture health panel. A non-zero drop count
-// is red: a dropping IDS is blind to what it dropped.
+// is red: a dropping IDS is blind to what it dropped. Stream evictions
+// count as drops: an evicted flow is no longer reassembled.
 func RenderHealth(m *Model) string {
 	h := m.Health
-	return fmt.Sprintf(" Captured          %12d\n Kernel drops      %s\n Queue drops       %s\n Queue depth       %12d\n Log records drop  %s\n Alert feed drops  %s",
-		h.Captured, drop(h.KernelDropped), drop(h.QueueDropped), h.QueueDepth, drop(h.LogDropped), drop(h.FeedDropped))
+	return fmt.Sprintf(" Captured          %12d\n Kernel drops      %s\n Queue drops       %s\n Queue depth       %12d\n Log records drop  %s\n Alert feed drops  %s\n"+
+		" Streams %8d  buf %10s\n Stream evictions  %s\n Gaps/desyncs/ovl  %12s",
+		h.Captured, drop(h.KernelDropped), drop(h.QueueDropped), h.QueueDepth, drop(h.LogDropped), drop(h.FeedDropped),
+		h.StreamFlows, HumanBytes(float64(h.StreamBuffered)), drop(h.StreamEvictions),
+		fmt.Sprintf("%d/%d/%d", h.StreamGaps, h.StreamDesyncs, h.StreamOverlaps))
 }
 
 func drop(n uint64) string {

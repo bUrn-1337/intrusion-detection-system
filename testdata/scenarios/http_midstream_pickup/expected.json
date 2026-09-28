@@ -1,0 +1,9 @@
+{
+  "description": "The IDS starts while a POST body is in flight (no handshake seen). The body tail, which contains '%25' and 'GET /', is not parsed as a request. The next request and response start at clean boundaries, both directions resync, and the split traversal request alerts.",
+  "alerts": [
+    {"sid": 1000202, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "src_port": 43003, "dst_port": 80, "count": [1, 1]},
+    {"sid": 1000201, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "src_port": 43003, "dst_port": 80, "count": [1, 1]}
+  ],
+  "log_must_not_contain": ["YWRtaW46aHVudGVyMg==", "hunter2"],
+  "stream_stats": {"resyncs": [2, 2], "overlap_conflicts": [0, 0], "messages": [3, 3]}
+}

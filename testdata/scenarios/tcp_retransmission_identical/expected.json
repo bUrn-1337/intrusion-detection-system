@@ -1,0 +1,10 @@
+{
+  "description": "The first request segment and the response are each retransmitted with identical bytes, as after a lost ACK. That is not an anomaly: no overlap alert, and the request alerts once.",
+  "alerts": [
+    {"sid": 1000202, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "src_port": 43005, "dst_port": 80, "count": [1, 1]},
+    {"sid": 1000201, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "src_port": 43005, "dst_port": 80, "count": [1, 1]}
+  ],
+  "absent_sids": [1000501],
+  "log_must_not_contain": ["YWRtaW46aHVudGVyMg==", "hunter2"],
+  "stream_stats": {"overlap_conflicts": [0, 0], "desyncs": [0, 0], "flows": [0, 0], "messages": [2, 2]}
+}

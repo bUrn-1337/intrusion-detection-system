@@ -44,6 +44,7 @@ type pkt struct {
 	sport, dport uint16
 	flags        string // TCP flag letters, e.g. "S", "SA", "A", "R", "PA"
 	seq, ack     uint32
+	zeroWin      bool // TCP window 0 instead of 64240
 	payload      string
 	unreach      *pkt
 	ttl          uint8     // IPv4 TTL or IPv6 hop limit; 0 means 64
@@ -126,6 +127,9 @@ func (s pkt) layers(tb testing.TB) []gopacket.SerializableLayer {
 	switch s.proto {
 	case "tcp":
 		tcp := &layers.TCP{SrcPort: layers.TCPPort(s.sport), DstPort: layers.TCPPort(s.dport), Seq: s.seq, Ack: s.ack, Window: 64240}
+		if s.zeroWin {
+			tcp.Window = 0
+		}
 		for _, c := range s.flags {
 			switch c {
 			case 'S':

@@ -68,6 +68,10 @@ var (
 // DNS, so garbage sent to a resolver is reported as malformed rather than
 // hidden as unknown.
 //
+// This is the per-segment path, used when the stream stage is not
+// reassembling the direction (another port, a desynced flow); reassembled
+// messages go through parseStream, which decodes each as complete.
+//
 // Over TCP, parseDNS returns nil (unknown traffic) for a segment that does
 // not frame cleanly as DNS. Without reassembly, a segment boundary can fall
 // anywhere: the prefix can arrive alone, split 1+1 across segments, or a

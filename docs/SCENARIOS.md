@@ -44,6 +44,17 @@ many captured bytes while keeping its original length, like a capture
 with a small snaplen; `udp_flood_bytes` uses it to write 100 MB of
 datagrams in a small pcap.
 
+For TCP stream reassembly, a `Conn` also writes segments out of the
+ordinary: `SetISN(client, server)` picks the initial sequence numbers
+(near 2^32 to test the wrap), `Seg(fromClient, off, data)` writes a
+segment `off` bytes after the next sequence number (negative or
+repeated for a retransmission, ahead for out-of-order) without moving
+it, and `Advance(fromClient, n)` then moves it and writes the ACK.
+`Push` sends without the peer's ACK, `Ack(fromClient, zeroWindow)`
+writes a bare ACK (`Pkt.ZeroWindow` advertises a zero window), and
+`Reset` a RST. A `Conn` used without `Handshake` is a connection the IDS
+picked up mid-stream.
+
 ## expected.json
 
 | field | meaning |
@@ -56,6 +67,7 @@ datagrams in a small pcap.
 | `rules` | rules file relative to the scenario directory |
 | `extra_rules` | lines appended to the rules file (default or `rules`) for this scenario only, e.g. `["arpbind 10.1.1.1 02:00:00:00:00:01"]` or a pass rule |
 | `log_must_not_contain` | strings (credentials) that must never appear in the log or on stdout |
+| `stream_stats` | bounds on counters of the shutdown stats record's `stream` object, e.g. `{"overlap_conflicts": [1, 1], "evictions": [2000, 3999]}` |
 
 An alert entry matches on stable fields only: `sid` and `kind` (`alert`
 or `summary`) are required; `src_ip`, `dst_ip`, `src_port`, `dst_port`,
