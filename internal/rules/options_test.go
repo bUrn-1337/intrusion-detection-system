@@ -141,7 +141,8 @@ func TestVariableErrors(t *testing.T) {
 		{"bad name char", "var A-B 10.0.0.1", []string{`1: variable name "A-B"`}},
 		{"no value", "var A", []string{"1: variable A: want one value"}},
 		{"two values", "var A 10.0.0.1 10.0.0.2", []string{"1: variable A: want one value (var NAME value), got 2 fields"}},
-		{"bad value", "var A nonsense", []string{`1: variable A: "nonsense" is neither an address value`}},
+		{"bad value", "var A a..b", []string{`1: variable A: "a..b" is neither an address value`}},
+		{"name var as address", "var N example.com\nalert tcp $N any -> any any" + rule, []string{"2: source address: $N holds names, not addresses"}},
 		{"mixed types", "var P [80,443]\nvar A [$P,10.0.0.1]", []string{`2: variable A: "[80,443,10.0.0.1]" is neither`}},
 		{"port var as address", "var P 80\nalert tcp $P any -> any any" + rule, []string{"2: source address: $P holds ports, not addresses"}},
 		{"address var as port", "var A 10.0.0.1\nalert tcp any $A -> any any" + rule, []string{"2: source port: $A holds addresses, not ports"}},
@@ -149,11 +150,11 @@ func TestVariableErrors(t *testing.T) {
 		{"any var in list", "var A any\nalert tcp [$A,10.0.0.2] any -> any any" + rule, []string{"2: source address: $A cannot be used inside a list"}},
 		{"partial reference", "var A 10\nalert tcp 10.0.0.$A any -> any any" + rule, []string{"2: source address: bad variable reference"}},
 		{"bad reference name", "alert tcp $1 any -> any any" + rule, []string{`1: source address: bad variable reference "$1"`}},
-		{"use of invalid var", "var A nonsense\nalert tcp $A any -> any any" + rule, []string{
+		{"use of invalid var", "var A a..b\nalert tcp $A any -> any any" + rule, []string{
 			"1: variable A:",
 			"2: source address: $A is invalid (line 1)",
 		}},
-		{"var of invalid var", "var A nonsense\nvar B $A", []string{"1: variable A:", "2: variable B: $A is invalid (line 1)"}},
+		{"var of invalid var", "var A a..b\nvar B $A", []string{"1: variable A:", "2: variable B: $A is invalid (line 1)"}},
 		{"double negated any", "var A any\nalert tcp !$A any -> any any" + rule, []string{"2: source address: !any matches nothing"}},
 		{"external needs home", `alert ip any any -> any any (msg:"m"; sid:1; detect:ttl_anomaly; count:5; seconds:60;)`, []string{"1: scope:external needs a HOME_NET variable"}},
 		{"home net of ports", "var HOME_NET 80\n" + `alert ip any any -> any any (msg:"m"; sid:1; detect:ttl_anomaly; count:5; seconds:60;)`, []string{"2: scope:external: $HOME_NET holds ports"}},

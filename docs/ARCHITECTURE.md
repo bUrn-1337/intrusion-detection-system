@@ -72,11 +72,25 @@ is parsed one segment at a time (as before reassembly) until a segment
 starts a message. Other state lives in the rule engine, in bounded
 tables.
 
+**Flows open on data, not on SYN.** A SYN or SYN-ACK only writes an entry
+in a fixed handshake table ([handshake.go](../internal/stream/handshake.go):
+16384 sets of 4 ways, about 4 MB allocated once, no pointers) holding the
+client side and both initial sequence numbers. The flow is opened by the
+first segment with payload, which takes those numbers and starts in sync.
+A spoofed SYN flood therefore fills and recycles table slots (a new SYN
+takes a free or stale way, or the oldest) and allocates nothing: the
+`spoofed_syn_flood_no_stream_flows` scenario checks that 5000 spoofed
+handshakes leave `flows_total` at 0. A connection whose slot was
+recycled before its first data is opened the way a mid-stream pickup is.
+
 **Single-threaded parse and engine.** One goroutine parses and matches
 every packet, in capture order. The handshake tracker and the dedup
 windows need packets in order and would need locks otherwise. The whole
-path measured about 2.7 s for a million flood SYNs from a pcap, so one
-core is not the bottleneck for this project. Capture and log writing are
+path, with the 74 rules of the default rules.conf, measured about 5.5 s
+for a million spoofed flood SYNs from a pcap and 3.3 s for a million
+mixed packets carrying 100k HTTP requests (the web rules' regexes and
+the DNS query table are about 0.3 s each of that), so one core is not
+the bottleneck for this project. Capture and log writing are
 the only other goroutines, joined by channels.
 
 **Packet-time clock.** The engine's clock is the packet timestamp, never
@@ -229,6 +243,33 @@ all day adds nothing. A tunnel shows either many sizes (interactive
 data) or random-looking bytes (compressed or encrypted data); `ping -p`
 has one size and low entropy.
 
+**Regexes are RE2.** `regex:` compiles with Go's regexp (RE2), which
+runs in time linear in the input, so a crafted request cannot make a
+rule backtrack for seconds (the PCRE ReDoS problem). The price is no
+backreferences and no lookaround; the web rules are written without
+them. Each evaluation reads at most the first 16 KiB of its field or
+data, and the literal options of a rule (`content`, `app_content`,
+`app_domain`, `app_field`) are checked first, so the regex runs only on
+packets that already look relevant.
+
+**One DNS query table for all DNS detectors.** Spoofing and amplification
+both depend on whether a response was asked for, so the engine keeps one
+table of outstanding questions per transaction (client address and port,
+server, id), fed by every query including whitelisted ones, and every
+response is classified against it before any rule runs. A forged answer
+must match the port and id to be *matched*; one that matches port and id
+but not the question is a *mismatch*. `id_race` additionally needs a
+question for the same name waiting at the same server, which is what a
+Kaminsky race targets and what a reflection victim never has.
+
+**Domains by the Public Suffix List.** dns_tunnel groups queries by
+registered domain (eTLD+1, golang.org/x/net/publicsuffix). "The last two
+labels" would make `co.uk` and `github.io` single domains, so a user
+browsing many British sites or GitHub Pages projects would look like one
+domain with hundreds of random subdomains (the
+`dns_cdn_many_subdomains_couk` scenario). The list includes its private
+section, so each `*.cloudfront.net` distribution is its own domain too.
+
 **WSL2 limitations.** The development machine is WSL2, where DNS goes to a
 proxy on `lo` rather than `eth0`, the clock sometimes steps backwards, and
 Hyper-V coalescing produces oversized frames and bad inbound checksums.
@@ -311,6 +352,14 @@ or more hosts within 30 s trips ping_sweep (1000403), as in the
 `icmp_monitoring_pings` scenario. Its pings are standard and answered,
 so icmp_flood and icmp_tunnel stay quiet; whitelist the monitoring host
 for ping_sweep.
+
+**DNS the IDS cannot read.** DNS over HTTPS and over TLS are encrypted:
+the DNS detectors see nothing of them, which is why rules 1000111
+(DoH by SNI) and 1000112 (TCP 853) flag their use as policy events. DoH
+to a server not in `$DOH_SERVERS`, or with Encrypted Client Hello hiding
+the SNI, is invisible. A sensor that sees only responses (asymmetric
+routing) finds every response unsolicited, and a tunnel slower than
+`count` subdomains per `seconds` is not detected.
 
 **UDP floods that get answers.** A flood at a service that answers every
 datagram (an open DNS or echo port) is not a udp_flood by design; the

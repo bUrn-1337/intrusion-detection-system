@@ -253,7 +253,8 @@ func appCases() []appCase {
 
 	get := "GET /index.html HTTP/1.1\r\nHost: Example.com\r\nUser-Agent: curl/8.5.0\r\nAccept: */*\r\n\r\n"
 	getWant := fields("method", "GET", "uri", "/index.html", "uri_decoded", "/index.html", "version", "1.1",
-		"host", "Example.com", "user_agent", "curl/8.5.0", "request_complete", "true")
+		"host", "Example.com", "user_agent", "curl/8.5.0", "request_complete", "true",
+		"headers_raw", "Host: Example.com\nUser-Agent: curl/8.5.0\nAccept: */*")
 	post := "POST /api/login HTTP/1.1\r\nhost: api.example\r\nCONTENT-TYPE: application/json\r\nContent-Length: 17\r\n\r\n{\"user\":\"alice\"}"
 	headers := func(n int) string {
 		var b strings.Builder
@@ -263,6 +264,13 @@ func appCases() []appCase {
 		}
 		b.WriteString("\r\n")
 		return b.String()
+	}
+	headersRaw := func(n int) string {
+		var lines []string
+		for i := range n {
+			lines = append(lines, fmt.Sprintf("X-H%d: v", i))
+		}
+		return strings.Join(lines, "\n")
 	}
 	simpleGet := fields("method", "GET", "uri", "/", "uri_decoded", "/", "version", "1.1", "request_complete", "true")
 
@@ -362,18 +370,22 @@ func appCases() []appCase {
 		{name: "http get", frame: tcp4(40000, 80, get), proto: packet.AppHTTP, want: getWant},
 		{name: "http post with headers", frame: tcp4(40000, 8080, post), proto: packet.AppHTTP,
 			want: fields("method", "POST", "uri", "/api/login", "uri_decoded", "/api/login", "version", "1.1",
-				"host", "api.example", "content_type", "application/json", "content_length", "17", "request_complete", "true")},
+				"host", "api.example", "content_type", "application/json", "content_length", "17", "request_complete", "true",
+				"headers_raw", "host: api.example\nCONTENT-TYPE: application/json\nContent-Length: 17")},
 		{name: "http response", frame: tcp4(80, 40000, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 1256\r\n\r\n<html>"),
 			proto: packet.AppHTTP,
-			want:  fields("version", "1.1", "status_code", "200", "content_type", "text/html", "content_length", "1256", "request_complete", "true")},
+			want: fields("version", "1.1", "status_code", "200", "content_type", "text/html", "content_length", "1256", "request_complete", "true",
+				"headers_raw", "Content-Type: text/html\nContent-Length: 1256")},
 		{name: "http request split before the blank line", frame: tcp4(40000, 80, "GET /a HTTP/1.1\r\nHost: x.example\r\nUser-Ag"),
 			proto: packet.AppHTTP,
-			want:  fields("method", "GET", "uri", "/a", "uri_decoded", "/a", "version", "1.1", "host", "x.example", "request_complete", "false")},
+			want: fields("method", "GET", "uri", "/a", "uri_decoded", "/a", "version", "1.1", "host", "x.example", "request_complete", "false",
+				"headers_raw", "Host: x.example")},
 		{name: "http request line split", frame: tcp4(40000, 80, "GET /very/long/pa"), proto: packet.AppHTTP,
 			want: fields("method", "GET", "uri", "/very/long/pa", "uri_decoded", "/very/long/pa", "request_complete", "false")},
 		{name: "http body continuation", frame: tcp4(80, 40000, "</div></body>\r\n</html>\r\n"), proto: packet.AppUnknown},
 		{name: "http single percent-encoding", frame: tcp4(40000, 80, "GET /a%20b?q=%41 HTTP/1.1\r\n\r\n"), proto: packet.AppHTTP,
-			want: fields("method", "GET", "uri", "/a%20b?q=%41", "uri_decoded", "/a b?q=A", "version", "1.1", "request_complete", "true")},
+			want: fields("method", "GET", "uri", "/a%20b?q=%41", "uri_decoded", "/a b?q=A", "version", "1.1", "request_complete", "true",
+				"query", "q=A")},
 		{name: "http double percent-encoding", frame: tcp4(40000, 80, "GET /a/%252e%252e/%252e%252e/etc/passwd HTTP/1.1\r\n\r\n"),
 			proto: packet.AppHTTP,
 			want: fields("method", "GET", "uri", "/a/%252e%252e/%252e%252e/etc/passwd", "uri_decoded", "/a/%2e%2e/%2e%2e/etc/passwd",
@@ -381,27 +393,27 @@ func appCases() []appCase {
 		{name: "http double percent-encoding without traversal", frame: tcp4(40000, 80, "GET /t?u=http%253A%252F%252Fa.example%252F%253Fx%253D1 HTTP/1.1\r\n\r\n"),
 			proto: packet.AppHTTP,
 			want: fields("method", "GET", "uri", "/t?u=http%253A%252F%252Fa.example%252F%253Fx%253D1", "uri_decoded", "/t?u=http%3A%2F%2Fa.example%2F%3Fx%3D1",
-				"version", "1.1", "request_complete", "true")},
+				"version", "1.1", "request_complete", "true", "query", "u=http%3A%2F%2Fa.example%2F%3Fx%3D1")},
 		{name: "http basic auth", frame: tcp4(40000, 80, "GET /admin HTTP/1.1\r\nHost: h\r\nAuthorization: Basic "+basicCred+"\r\n\r\n"),
 			proto: packet.AppHTTP,
 			want: fields("method", "GET", "uri", "/admin", "uri_decoded", "/admin", "version", "1.1", "host", "h",
-				"auth_basic", "true", "request_complete", "true"),
+				"auth_basic", "true", "request_complete", "true", "headers_raw", "Host: h\nAuthorization: <redacted>"),
 			secrets: []string{basicCred, basicPlain, "alice:"}},
 		{name: "http basic auth, lowercase scheme", frame: tcp4(40000, 80, "GET / HTTP/1.1\r\nauthorization:   basic "+basicCred+"\r\n\r\n"),
-			proto: packet.AppHTTP, want: with(simpleGet, "auth_basic", "true"),
+			proto: packet.AppHTTP, want: with(simpleGet, "auth_basic", "true", "headers_raw", "authorization: <redacted>"),
 			secrets: []string{basicCred, basicPlain}},
 		{name: "http bearer auth is not basic", frame: tcp4(40000, 80, "GET / HTTP/1.1\r\nAuthorization: Bearer "+bearerToken+"\r\n\r\n"),
-			proto: packet.AppHTTP, want: simpleGet, secrets: []string{bearerToken}},
+			proto: packet.AppHTTP, want: with(simpleGet, "headers_raw", "Authorization: <redacted>"), secrets: []string{bearerToken}},
 		{name: "http malformed header carrying a credential", frame: tcp4(40000, 80, "GET / HTTP/1.1\r\n"+basicCred+"\r\n\r\n"),
 			proto: packet.AppHTTP, want: with(simpleGet, "malformed_reason", "header line without a name"),
 			errs: []string{"http: header line without a name"}, secrets: []string{basicCred}},
 		{name: "http h2c preface", frame: tcp4(40000, 80, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x12\x04"), proto: packet.AppHTTP,
 			want: fields("version", "2.0")},
-		{name: "http 100 headers is fine", frame: tcp4(40000, 80, headers(100)), proto: packet.AppHTTP, want: simpleGet},
+		{name: "http 100 headers is fine", frame: tcp4(40000, 80, headers(100)), proto: packet.AppHTTP, want: with(simpleGet, "headers_raw", headersRaw(100))},
 		{name: "http more than 100 headers", frame: tcp4(40000, 80, headers(101)), proto: packet.AppHTTP,
-			want: with(simpleGet, "malformed_reason", "more than 100 headers"), errs: []string{"http: more than 100 headers"}},
+			want: with(simpleGet, "malformed_reason", "more than 100 headers", "headers_raw", headersRaw(100)), errs: []string{"http: more than 100 headers"}},
 		{name: "http header line of 8 KiB is fine", frame: tcp4(40000, 80, "GET / HTTP/1.1\r\nX: "+strings.Repeat("v", 8192-3)+"\r\n\r\n"),
-			proto: packet.AppHTTP, want: simpleGet},
+			proto: packet.AppHTTP, want: with(simpleGet, "headers_raw", "X: "+strings.Repeat("v", 8192-3))},
 		{name: "http header line over 8 KiB", frame: tcp4(40000, 80, "GET / HTTP/1.1\r\nX: "+strings.Repeat("v", 8192-2)+"\r\n\r\n"),
 			proto: packet.AppHTTP, want: with(simpleGet, "malformed_reason", "line longer than 8192 bytes"),
 			errs: []string{"http: line longer than 8192 bytes"}},
@@ -425,7 +437,26 @@ func appCases() []appCase {
 			want: fields("request_complete", "true", "malformed_reason", "invalid status line"),
 			errs: []string{"http: invalid status line"}},
 		{name: "http bad content-length", frame: tcp4(40000, 80, "GET / HTTP/1.1\r\nContent-Length: 1e9\r\n\r\n"), proto: packet.AppHTTP,
-			want: with(simpleGet, "malformed_reason", "invalid content-length"), errs: []string{"http: invalid content-length"}},
+			want: with(simpleGet, "malformed_reason", "invalid content-length", "headers_raw", "Content-Length: 1e9"), errs: []string{"http: invalid content-length"}},
+		{name: "http folded authorization is redacted", frame: tcp4(40000, 80, "GET / HTTP/1.1\r\nAuthorization: Basic\r\n "+basicCred+"\r\nProxy-Authorization: Basic "+basicCred+"\r\nX: y\r\n\r\n"),
+			proto: packet.AppHTTP, want: with(simpleGet, "auth_basic", "true",
+				"headers_raw", "Authorization: <redacted>\nProxy-Authorization: <redacted>\nX: y"),
+			secrets: []string{basicCred}},
+		{name: "http headers_raw is capped at 8 KiB", frame: tcp4(40000, 80, "GET / HTTP/1.1\r\n"+strings.Repeat("X-Long: "+strings.Repeat("v", 1000)+"\r\n", 9)+"\r\n"),
+			proto: packet.AppHTTP, want: with(simpleGet,
+				"headers_raw", strings.Repeat("X-Long: "+strings.Repeat("v", 1000)+"\n", 9)[:8192])},
+		{name: "http query decoding", frame: tcp4(40000, 80, "GET /s?q=a+b%2Bc%20d&x=%2527#frag HTTP/1.1\r\n\r\n"),
+			proto: packet.AppHTTP, want: fields("method", "GET", "uri", "/s?q=a+b%2Bc%20d&x=%2527#frag", "uri_decoded", "/s?q=a+b+c d&x=%27#frag",
+				"version", "1.1", "request_complete", "true", "query", "q=a b+c d&x=%27")},
+		{name: "http empty query", frame: tcp4(40000, 80, "GET /s? HTTP/1.1\r\n\r\n"),
+			proto: packet.AppHTTP, want: fields("method", "GET", "uri", "/s?", "uri_decoded", "/s?",
+				"version", "1.1", "request_complete", "true", "query", "")},
+		{name: "http overlong utf-8 traversal", frame: tcp4(40000, 80, "GET /a/%c0%ae%c0%ae/%e0%80%ae%e0%80%ae%c0%afetc/passwd HTTP/1.1\r\n\r\n"),
+			proto: packet.AppHTTP, want: fields("method", "GET", "uri", "/a/%c0%ae%c0%ae/%e0%80%ae%e0%80%ae%c0%afetc/passwd", "uri_decoded", "/a/../../etc/passwd",
+				"version", "1.1", "request_complete", "true", "suspicious_reason", "overlong utf-8 encoding")},
+		{name: "http valid utf-8 is not overlong", frame: tcp4(40000, 80, "GET /caf%c3%a9/%e2%82%ac/%f0%9f%98%80 HTTP/1.1\r\n\r\n"),
+			proto: packet.AppHTTP, want: fields("method", "GET", "uri", "/caf%c3%a9/%e2%82%ac/%f0%9f%98%80", "uri_decoded", "/café/€/😀",
+				"version", "1.1", "request_complete", "true")},
 		{name: "port 80 payload that is not http", frame: tcp4(40000, 80, "\x00\x01\x02binary junk"), proto: packet.AppUnknown},
 
 		// ---- FTP ----

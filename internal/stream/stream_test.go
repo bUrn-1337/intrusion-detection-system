@@ -812,13 +812,15 @@ func TestCleanup(t *testing.T) {
 		c := newConn(t, r, 80)
 		c.handshake()
 		id := c.send(true, "GET / HTTP/1.1\r\n").FlowID
-		p := c.raw(true, "S", c.cseq-1, "") // SYN retransmission: same flow? no: ISN differs
-		if len(p.ClosedFlows) != 1 || p.ClosedFlows[0] != id || p.FlowID == id {
+		c.cseq += 1 << 20 // a new ISN
+		p := c.raw(true, "S", c.cseq-1, "")
+		if len(p.ClosedFlows) != 1 || p.ClosedFlows[0] != id || p.FlowID != 0 {
 			t.Fatalf("new connection: closed %v id %d", p.ClosedFlows, p.FlowID)
 		}
-		p2 := c.raw(true, "S", c.cseq-1, "")
-		if p2.ClosedFlows != nil || p2.FlowID != p.FlowID {
-			t.Fatal("retransmitted SYN restarted the flow")
+		c.raw(true, "S", c.cseq-1, "") // retransmitted
+		p = c.send(true, "GET /b HTTP/1.1\r\n\r\n")
+		if p.FlowID == 0 || p.FlowID == id || appData(p) != "GET /b HTTP/1.1\r\n\r\n" {
+			t.Fatalf("new flow: id %d (old %d), AppData %q", p.FlowID, id, p.AppData)
 		}
 	})
 	t.Run("no flow for bare ack or rst", func(t *testing.T) {
@@ -826,6 +828,102 @@ func TestCleanup(t *testing.T) {
 		c := newConn(t, r, 80)
 		if c.raw(true, "A", 1, "").FlowID != 0 || c.raw(true, "R", 1, "").FlowID != 0 || c.raw(true, "FA", 1, "").FlowID != 0 {
 			t.Fatal("flow opened")
+		}
+	})
+}
+
+func TestLazyFlows(t *testing.T) {
+	t.Run("handshake opens nothing, data opens in sync", func(t *testing.T) {
+		r := New(Config{})
+		c := newConn(t, r, 80)
+		c.handshake()
+		if s := r.Stats(); s.FlowsTotal != 0 || s.Flows != 0 {
+			t.Fatalf("handshake opened a flow: %+v", s)
+		}
+		c.wait(time.Second)
+		req := "GET / HTTP/1.1\r\nHost: a\r\n\r\n"
+		p := c.send(true, req)
+		if p.FlowID == 0 || p.StreamProto != packet.AppHTTP || appData(p) != req {
+			t.Fatalf("first data: id %d proto %q AppData %q", p.FlowID, p.StreamProto, p.AppData)
+		}
+		if !p.FlowStart.Equal(t0) {
+			t.Fatalf("FlowStart = %v, want the SYN time %v", p.FlowStart, t0)
+		}
+		if r.Stats().FlowsTotal != 1 {
+			t.Fatal("flow not counted")
+		}
+	})
+	t.Run("out-of-order first segment waits for the gap", func(t *testing.T) {
+		r := New(Config{})
+		c := newConn(t, r, 80)
+		c.handshake()
+		req := "GET / HTTP/1.1\r\nHost: a\r\n\r\n"
+		p2 := c.raw(true, "PA", c.cseq+10, req[10:])
+		p1 := c.raw(true, "PA", c.cseq, req[:10])
+		if p2.AppData != nil || appData(p1) != req {
+			t.Fatalf("AppData %q then %q", p2.AppData, p1.AppData)
+		}
+	})
+	t.Run("handshake decides the client", func(t *testing.T) {
+		// The client sends from port 80 to a server on 8080: the port
+		// rule alone would take the port-80 side as the server.
+		r := New(Config{})
+		c := newConn(t, r, 8080)
+		c.cport = 80
+		c.handshake()
+		req := "GET / HTTP/1.1\r\n\r\n"
+		p := c.send(true, req)
+		if appData(p) != req || p.AppFields["http_state"] != "headers_complete" {
+			t.Fatalf("AppData %q, fields %v", p.AppData, p.AppFields)
+		}
+	})
+	t.Run("server speaks first", func(t *testing.T) {
+		r := New(Config{})
+		c := newConn(t, r, 21)
+		c.handshake()
+		p := c.send(false, "220 ready\r\n")
+		q := c.send(true, "USER a\r\n")
+		if appData(p) != "220 ready\r\n" || appData(q) != "USER a\r\n" || p.FlowID != q.FlowID {
+			t.Fatalf("banner %q, command %q", p.AppData, q.AppData)
+		}
+	})
+	t.Run("rst or stale handshake is forgotten", func(t *testing.T) {
+		r := New(Config{IdleTimeout: time.Minute})
+		c := newConn(t, r, 80)
+		c.handshake()
+		c.raw(false, "RA", c.sseq, "")
+		c.wait(time.Second)
+		if p := c.send(true, "GET / HTTP/1.1\r\n\r\n"); !p.FlowStart.Equal(c.now) {
+			t.Fatalf("after RST: FlowStart %v, want %v", p.FlowStart, c.now)
+		}
+		d := newConn(t, r, 80)
+		d.cport = 40001
+		d.now = c.now
+		d.handshake()
+		d.wait(61 * time.Second)
+		if p := d.send(true, "GET / HTTP/1.1\r\n\r\n"); !p.FlowStart.Equal(d.now) {
+			t.Fatalf("stale: FlowStart %v, want %v", p.FlowStart, d.now)
+		}
+	})
+	t.Run("syn flood opens no flows", func(t *testing.T) {
+		r := New(Config{})
+		src := make(net.IP, 4)
+		for i := range 4 * hsSets * hsWays {
+			binary.BigEndian.PutUint32(src, 0xc6120000+uint32(i)) // 198.18.0.0/15
+			p := mkpkt(t0, src.String(), "192.0.2.1", 1024+uint16(i), 80, "S", uint32(i), nil)
+			r.Process(p)
+			if p.FlowID != 0 {
+				t.Fatal("SYN got a flow")
+			}
+		}
+		if s := r.Stats(); s.FlowsTotal != 0 || s.Charged != 0 {
+			t.Fatalf("stats %+v", s)
+		}
+		// The table still works after being filled.
+		c := newConn(t, r, 80)
+		c.handshake()
+		if p := c.send(true, "GET / HTTP/1.1\r\n\r\n"); !p.FlowStart.Equal(t0) || p.AppData == nil {
+			t.Fatalf("handshake after flood: %v %q", p.FlowStart, p.AppData)
 		}
 	})
 }

@@ -3,6 +3,7 @@ package rules
 import (
 	"bytes"
 	"net/netip"
+	"regexp"
 	"strings"
 	"time"
 
@@ -77,6 +78,24 @@ const (
 	DetectICMPFlood  = "icmp_flood"
 	DetectICMPTunnel = "icmp_tunnel"
 	DetectSlowloris  = "slowloris"
+	// DNS detectors (dns.go).
+	DetectDNSSpoof         = "dns_spoof"
+	DetectDNSAmplification = "dns_amplification"
+	DetectDNSTunnel        = "dns_tunnel"
+	DetectNXDomainBurst    = "dns_nxdomain_burst"
+)
+
+// Values of the dns_spoof kind option.
+const (
+	SpoofUnsolicited   = "unsolicited_response"
+	SpoofIDRace        = "id_race"
+	SpoofQNameMismatch = "qname_mismatch"
+)
+
+// Values of the dns_tunnel kind option.
+const (
+	TunnelSubdomains = "subdomains"
+	TunnelTXT        = "txt"
 )
 
 // Values of the slowloris kind option.
@@ -134,10 +153,14 @@ type Rule struct {
 	hasAnomaly bool
 	anomaly    string
 
-	contents   []contentMatch
-	appProto   string // packet.AppDNS etc., or ""
-	appFields  []appField
-	appReasons []string // AppFields keys, e.g. "malformed_reason"
+	contents    []contentMatch
+	appProto    string // packet.AppDNS etc., or ""
+	appFields   []appField
+	appReasons  []string // AppFields keys, e.g. "malformed_reason"
+	appContents []appContent
+	appDomains  []appDomain
+	fieldRegex  []fieldRegex     // regex on AppFields keys
+	dataRegex   []*regexp.Regexp // regex:data
 
 	filter *windowSpec // detection_filter, or nil
 
@@ -167,6 +190,16 @@ type Rule struct {
 
 	// icmp_flood
 	icmpKind string
+
+	// dns_spoof and dns_tunnel
+	dnsKind string
+	// dns_amplification
+	minBytes uint64
+	ampRatio float64 // min_ratio
+	// dns_tunnel and dns_nxdomain_burst
+	minEntropy float64
+	minLength  int      // dns_tunnel kind:subdomains
+	allow      []string // dns_tunnel: registered domains never counted
 
 	// slowloris; detect.seconds is the activity window of slow_headers
 	// and slow_body.
@@ -234,6 +267,36 @@ type contentMatch struct {
 
 type appField struct{ key, value string }
 
+// appContent is app_content: pat is a substring of AppFields[key],
+// lowercased (ASCII only) when nocase.
+type appContent struct {
+	key, pat string
+	nocase   bool
+}
+
+// appDomain is app_domain:KEY,LIST: the field is one of names or a
+// subdomain of one.
+type appDomain struct {
+	key   string
+	names []string
+}
+
+// fieldRegex is regex on an AppFields key.
+type fieldRegex struct {
+	key string
+	re  *regexp.Regexp
+}
+
+// maxRegexInput caps what one regex evaluation reads: only the first
+// 16 KiB of a field or of the data is searched. RE2 runs in linear time,
+// so this bounds the cost of each evaluation to a constant.
+const maxRegexInput = 16 << 10
+
+// DataKey is the regex key that means the application data: the
+// messages a packet completed (AppData), or its payload if it completed
+// none.
+const DataKey = "data"
+
 // TCP flag bits, in wire order.
 const (
 	tcpFIN uint8 = 1 << iota
@@ -266,6 +329,10 @@ type RuleSet struct {
 	udp    []*Rule // detect:udp_flood rules
 	icmp   []*Rule // detect:icmp_flood and icmp_tunnel rules
 	slow   []*Rule // detect:slowloris rules; the slow flow table runs when non-empty
+	dns    []*Rule // the DNS detectors (dns.go)
+	// dnsQueries is true when some dns_spoof or dns_amplification rule
+	// needs the outstanding query table.
+	dnsQueries bool
 	// echoReqs is true when some icmp_flood rule has kind
 	// unsolicited_reply, so outstanding echo requests are tracked.
 	echoReqs bool
@@ -345,6 +412,11 @@ func newRuleSet(file string, rules []*Rule, static map[netip.Addr]mac6) *RuleSet
 				}
 			case DetectSlowloris:
 				rs.slow = append(rs.slow, r)
+			case DetectDNSSpoof, DetectDNSAmplification, DetectDNSTunnel, DetectNXDomainBurst:
+				rs.dns = append(rs.dns, r)
+				if r.Detect == DetectDNSSpoof || r.Detect == DetectDNSAmplification {
+					rs.dnsQueries = true
+				}
 			}
 			continue
 		}
@@ -496,7 +568,7 @@ func (r *Rule) match(v *view) bool {
 	if r.hasAnomaly && (v.p == nil || v.p.StreamAnomaly == "" || r.anomaly != "" && v.p.StreamAnomaly != r.anomaly) {
 		return false
 	}
-	if r.appProto != "" || len(r.appFields) > 0 || len(r.appReasons) > 0 {
+	if r.appProto != "" || r.perMessage() {
 		if v.p == nil {
 			return false
 		}
@@ -504,8 +576,8 @@ func (r *Rule) match(v *view) bool {
 			return false
 		}
 		// With several messages (AppMore), one of them must satisfy
-		// every app_field and app_reason.
-		if len(r.appFields) > 0 || len(r.appReasons) > 0 {
+		// every app_field, app_reason, app_content and field regex.
+		if r.perMessage() {
 			ok := r.matchApp(v.p.AppFields)
 			for i := 0; !ok && i < len(v.p.AppMore); i++ {
 				ok = r.matchApp(v.p.AppMore[i])
@@ -515,15 +587,35 @@ func (r *Rule) match(v *view) bool {
 			}
 		}
 	}
-	if len(r.contents) == 0 {
-		return true
-	}
 	// Every content must be in the segment's payload, or every content in
-	// the messages it completed (AppData), which may span segments.
-	if r.matchContents(v.getPayload(), v.getLower) {
-		return true
+	// the messages it completed (AppData), which may span segments. The
+	// literals run before any data regex.
+	if len(r.contents) > 0 && !r.matchContents(v.getPayload(), v.getLower) &&
+		(v.p == nil || v.p.AppData == nil || !r.matchContents(v.p.AppData, v.getAppLower)) {
+		return false
 	}
-	return v.p != nil && v.p.AppData != nil && r.matchContents(v.p.AppData, v.getAppLower)
+	if len(r.dataRegex) > 0 {
+		if v.p == nil {
+			return false
+		}
+		data := v.p.AppData
+		if data == nil {
+			data = v.getPayload()
+		}
+		data = data[:min(len(data), maxRegexInput)]
+		for _, re := range r.dataRegex {
+			if !re.Match(data) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// perMessage reports whether r has options checked against the fields
+// of one application message.
+func (r *Rule) perMessage() bool {
+	return len(r.appFields) > 0 || len(r.appReasons) > 0 || len(r.appContents) > 0 || len(r.appDomains) > 0 || len(r.fieldRegex) > 0
 }
 
 func (r *Rule) matchApp(fields map[string]string) bool {
@@ -538,7 +630,65 @@ func (r *Rule) matchApp(fields map[string]string) bool {
 			return false
 		}
 	}
+	for _, c := range r.appContents {
+		got, ok := fields[c.key]
+		if !ok || !containsASCII(got, c.pat, c.nocase) {
+			return false
+		}
+	}
+	for _, d := range r.appDomains {
+		got, ok := fields[d.key]
+		if !ok || !inDomains(got, d.names) {
+			return false
+		}
+	}
+	for _, f := range r.fieldRegex {
+		got, ok := fields[f.key]
+		if !ok || !f.re.MatchString(got[:min(len(got), maxRegexInput)]) {
+			return false
+		}
+	}
 	return true
+}
+
+// inDomains reports whether name, compared without case and a trailing
+// dot, is one of names or a subdomain of one.
+func inDomains(name string, names []string) bool {
+	name = strings.TrimSuffix(name, ".")
+	for _, d := range names {
+		if len(name) == len(d) && strings.EqualFold(name, d) ||
+			len(name) > len(d) && name[len(name)-len(d)-1] == '.' && strings.EqualFold(name[len(name)-len(d):], d) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsASCII reports whether pat is in s; with fold, s is compared
+// with A-Z folded to lower case (pat is already lower case).
+func containsASCII(s, pat string, fold bool) bool {
+	if !fold {
+		return strings.Contains(s, pat)
+	}
+	if len(pat) == 0 {
+		return true
+	}
+	for i := 0; i+len(pat) <= len(s); i++ {
+		j := 0
+		for ; j < len(pat); j++ {
+			c := s[i+j]
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != pat[j] {
+				break
+			}
+		}
+		if j == len(pat) {
+			return true
+		}
+	}
+	return false
 }
 
 // matchContents reports whether every content is in hay, or in lower()

@@ -1,0 +1,8 @@
+{
+  "description": "5000 SYNs from spoofed sources to 192.0.2.10:80 in 1s, each answered SYN/ACK, none completed. syn_flood fires; the stream stage keeps them in its fixed handshake table and opens no flow.",
+  "alerts": [
+    {"sid": 1000001, "kind": "alert", "dst_ip": "192.0.2.10", "count": [1, 1], "details": {"detector": "syn_flood", "tracked_addr": "192.0.2.10"}},
+    {"sid": 1000001, "kind": "summary", "count": [4800, 5000]}
+  ],
+  "stream_stats": {"flows_total": [0, 0], "flows": [0, 0], "evictions": [0, 0]}
+}

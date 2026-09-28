@@ -1,0 +1,4 @@
+{
+  "description": "20 normal lookups, then one answer that arrives 15s after its query, when the query table has forgotten it. One unmatched answer is not an attack: nothing fires.",
+  "alerts": []
+}

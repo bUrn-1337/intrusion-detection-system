@@ -1,0 +1,10 @@
+{
+  "description": "10.0.0.99 is a reflection victim: 20 open resolvers send it 500 3000-byte ANY answers in 2.5s that it never asked for. dns_amplification fires on unmatched bytes over 1 MB; unsolicited_response fires as well. id_race must not: the victim has no pending question to race.",
+  "alerts": [
+    {"sid": 1000106, "kind": "alert", "dst_ip": "10.0.0.99", "count": [1, 1], "details": {"detector": "dns_amplification", "reason": "unmatched", "tracked_addr": "10.0.0.99", "top_qtype": "255"}},
+    {"sid": 1000106, "kind": "summary", "count": [100, 200]},
+    {"sid": 1000103, "kind": "alert", "dst_ip": "10.0.0.99", "count": [1, 1]},
+    {"sid": 1000103, "kind": "summary", "count": [400, 491]}
+  ],
+  "absent_sids": [1000104]
+}

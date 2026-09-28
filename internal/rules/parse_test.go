@@ -269,7 +269,7 @@ func TestParseErrors(t *testing.T) {
 		{"detection_filter count", hdr + `(msg:"m"; sid:1; detection_filter:track by_src, count 0, seconds 1;)`, "count"},
 		{"detection_filter term", hdr + `(msg:"m"; sid:1; detection_filter:track by_src, count 5, secs 1;)`, `unknown term "secs"`},
 		{"detection_filter too big", hdr + `(msg:"m"; sid:1; detection_filter:track by_src, count 100001, seconds 1;)`, "1 to 100000"},
-		{"detect unknown", hdr + `(msg:"m"; sid:1; detect:port_sweep;)`, `detect "port_sweep": want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood, icmp_tunnel or slowloris`},
+		{"detect unknown", hdr + `(msg:"m"; sid:1; detect:port_sweep;)`, `detect "port_sweep": want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood, icmp_tunnel, slowloris, dns_spoof, dns_amplification, dns_tunnel or dns_nxdomain_burst`},
 		{"port_scan missing params", hdr + `(msg:"m"; sid:1; detect:port_scan;)`, "detect:port_scan needs distinct_ports, seconds"},
 		{"port_scan with track", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10; track:by_dst;)`, "option track is not valid with detect:port_scan"},
 		{"port_scan with count", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10; count:5;)`, "option count is not valid with detect:port_scan"},
@@ -416,7 +416,7 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rules.conf: %v", err)
 	}
-	if rs.Len() != 49 || len(rs.detectors) != 29 {
+	if rs.Len() != 74 || len(rs.detectors) != 36 {
 		t.Errorf("rules.conf: %d rules, %d detectors", rs.Len(), len(rs.detectors))
 	}
 	for _, r := range rs.Rules() {
@@ -502,6 +502,22 @@ func FuzzLoad(f *testing.F) {
 	f.Add(`alert icmp any any -> any any (msg:"m"; sid:1; detect:icmp_flood; kind:echo; track:by_src; count:1000; seconds:5;)` + "\n" +
 		`alert icmp any any -> any any (msg:"m"; sid:2; detect:icmp_flood; kind:unsolicited_reply; count:100; seconds:5;)`)
 	f.Add(`alert icmp any any -> any any (msg:"m"; sid:1; detect:icmp_tunnel; count:10; seconds:60;)`)
+	f.Add(`alert tcp any any -> any 80 (msg:"m"; sid:1; app_content:uri,"UNION",nocase; regex:query,"(?i)union\s+select\b"; regex:headers_raw,"\(\)\s*\{";)`)
+	f.Add(`alert udp any any -> any any (msg:"m"; sid:2; regex:data,"\x00{4}\"\;";)` + "\n" +
+		`alert tcp any any -> any any (msg:"m"; sid:3; app_content:user_agent,"|73 71|lmap";)`)
+	f.Add(`alert tcp any any -> any any (msg:"m"; sid:1; regex:uri,"a(";)` + "\n" +
+		`alert tcp any any -> any any (msg:"m"; sid:2; app_content:uri,"x",bad;)`)
+	f.Add(`alert udp any any -> any 53 (msg:"m"; sid:1; detect:dns_spoof; kind:id_race; count:10; seconds:2;)` + "\n" +
+		`alert udp any any -> any any (msg:"m"; sid:2; detect:dns_spoof; kind:qname_mismatch;)` + "\n" +
+		`alert udp any any -> any any (msg:"m"; sid:3; detect:dns_amplification; min_bytes:1000000; seconds:5; min_ratio:10;)`)
+	f.Add("var ALLOW [in-addr.arpa,ip6.arpa]\n" +
+		`alert udp any any -> any any (msg:"m"; sid:1; detect:dns_tunnel; kind:subdomains; count:50; seconds:60; min_entropy:3.5; min_length:50; allow:$ALLOW;)` + "\n" +
+		`alert udp any any -> any any (msg:"m"; sid:2; detect:dns_tunnel; kind:txt; count:100; seconds:60;)` + "\n" +
+		`alert udp any any -> any any (msg:"m"; sid:3; detect:dns_nxdomain_burst; count:30; seconds:60; min_entropy:3.0;)`)
+	f.Add("var A [dns.google,cloudflare-dns.com]\nvar B [$A,c.com]\n" +
+		`alert tcp any any -> any 443 (msg:"m"; sid:1; app_proto:tls; app_domain:sni,$B;)` + "\n" +
+		`alert tcp any any -> any 443 (msg:"m"; sid:2; app_domain:sni,!$A;)` + "\n" +
+		`alert tcp $A any -> any any (msg:"m"; sid:3; detect:dns_spoof;)`)
 	f.Fuzz(func(t *testing.T, text string) {
 		rs, err := Parse(strings.NewReader(text), "fuzz")
 		if err != nil {

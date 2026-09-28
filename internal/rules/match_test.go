@@ -200,7 +200,7 @@ func TestDefaultRules(t *testing.T) {
 		{"malformed dns", pkt{proto: "udp", src: c, dst: s, sport: 40000, dport: 53, payload: "\x00\x01"}, []int{1000102}},
 		{"basic auth", pkt{proto: "tcp", src: c, dst: s, sport: 40000, dport: 80, flags: "PA", payload: "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Basic dXNlcjpwYXNz\r\n\r\n"}, []int{1000201}},
 		{"bearer auth", pkt{proto: "tcp", src: c, dst: s, sport: 40000, dport: 80, flags: "PA", payload: "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer abc\r\n\r\n"}, nil},
-		{"double encoding", pkt{proto: "tcp", src: c, dst: s, sport: 40000, dport: 80, flags: "PA", payload: "GET /a/%252e%252e/etc/passwd HTTP/1.1\r\nHost: x\r\n\r\n"}, []int{1000202}},
+		{"double encoding", pkt{proto: "tcp", src: c, dst: s, sport: 40000, dport: 80, flags: "PA", payload: "GET /a/%252e%252e/etc/passwd HTTP/1.1\r\nHost: x\r\n\r\n"}, []int{1000202, 1000218}},
 		{"single encoding", pkt{proto: "tcp", src: c, dst: s, sport: 40000, dport: 80, flags: "PA", payload: "GET /a%20b HTTP/1.1\r\nHost: x\r\n\r\n"}, nil},
 		{"ftp pass", pkt{proto: "tcp", src: c, dst: s, sport: 40000, dport: 21, flags: "PA", payload: "PASS hunter2\r\n"}, []int{1000301}},
 		{"ftp user", pkt{proto: "tcp", src: c, dst: s, sport: 40000, dport: 21, flags: "PA", payload: "USER bob\r\n"}, nil},

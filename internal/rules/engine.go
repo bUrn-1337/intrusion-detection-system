@@ -94,6 +94,11 @@ const (
 	TableICMPTunnel      = "icmp_tunnel"
 	TableSlowFlows       = "slow_flows"
 	TableSlowloris       = "slowloris"
+	TableDNSQueries      = "dns_queries"
+	TableDNSSpoof        = "dns_spoof"
+	TableDNSAmp          = "dns_amplification"
+	TableDNSTunnel       = "dns_tunnel"
+	TableNXDomain        = "dns_nxdomain"
 )
 
 // EngineStats is a snapshot of engine counters.
@@ -156,6 +161,8 @@ type Engine struct {
 	arpReqs       *arpRequests
 	echoReqs      *recentSet[echoKey] // outstanding echo requests, for icmp_flood kind:unsolicited_reply
 	slow          *slowTable          // HTTP flows that may be slow, for slowloris
+	dnsQueries    *dnsQueries         // outstanding DNS queries, for dns_spoof and dns_amplification
+	dnsBuf        []dnsMsg
 
 	packets, alerts, summaries, suppressed, passed, whitelisted atomic.Uint64
 	reloads, reloadFails                                        atomic.Uint64
@@ -186,12 +193,18 @@ const (
 	tICMPTunnel
 	tSlowFlows
 	tSlowloris
+	tDNSQueries
+	tDNSSpoof
+	tDNSAmp
+	tDNSTunnel
+	tNXDomain
 	numTables
 )
 
 var tableNames = [numTables]string{TableDedup, TableHandshake, TableDetectionFilter, TableSYNFlood, TablePortScan, TableHostSweep, TablePingSweep,
 	TableTTLAnomaly, TableFragments, TableFragFlood, TableTTLFlows, TableARPBindings, TableARPRequests, TableARPSpoof,
-	TableUDPFlood, TableUDPFlows, TableICMPFlood, TableICMPPeers, TableEchoRequests, TableICMPTunnel, TableSlowFlows, TableSlowloris}
+	TableUDPFlood, TableUDPFlows, TableICMPFlood, TableICMPPeers, TableEchoRequests, TableICMPTunnel, TableSlowFlows, TableSlowloris,
+	TableDNSQueries, TableDNSSpoof, TableDNSAmp, TableDNSTunnel, TableNXDomain}
 
 // scanTables maps a scan detector to its table.
 var scanTables = map[string]int{DetectPortScan: tPortScan, DetectHostSweep: tHostSweep, DetectPingSweep: tPingSweep}
@@ -209,6 +222,10 @@ type ruleState struct {
 	udp    *udpFlood
 	icmp   *icmpFlood
 	tunnel *icmpTunnel
+	spoof  *dnsSpoof
+	amp    *dnsAmp
+	dnsTun *dnsTunnel
+	nx     *nxBurst
 }
 
 // NewEngine returns an engine using rs.
@@ -237,6 +254,7 @@ func NewEngine(rs *RuleSet, cfg EngineConfig) *Engine {
 	e.arpReqs = newARPRequests(cfg.MaxKeys, &e.tables[tARPRequests])
 	e.echoReqs = newRecentSet[echoKey](echoRequestIdle, cfg.MaxKeys, &e.tables[tEchoRequests])
 	e.slow = newSlowTable(cfg.MaxKeys, &e.tables[tSlowFlows], &e.tables[tSlowloris])
+	e.dnsQueries = newDNSQueries(cfg.MaxKeys, &e.tables[tDNSQueries])
 	e.next.Store(rs)
 	e.nRules.Store(int64(rs.Len()))
 	e.activate(rs)
@@ -300,6 +318,18 @@ func (e *Engine) activate(rs *RuleSet) {
 			if st.tunnel != nil {
 				st.tunnel.rule = r
 			}
+			if st.spoof != nil {
+				st.spoof.rule = r
+			}
+			if st.amp != nil {
+				st.amp.rule = r
+			}
+			if st.dnsTun != nil {
+				st.dnsTun.rule = r
+			}
+			if st.nx != nil {
+				st.nx.rule = r
+			}
 			continue
 		}
 		st := &ruleState{text: r.text}
@@ -325,6 +355,14 @@ func (e *Engine) activate(rs *RuleSet) {
 			st.icmp = newICMPFlood(r, e.cfg.MaxKeys, &e.tables[tICMPFlood], &e.tables[tICMPPeers])
 		case DetectICMPTunnel:
 			st.tunnel = newICMPTunnel(r, e.cfg.MaxKeys, &e.tables[tICMPTunnel])
+		case DetectDNSSpoof:
+			st.spoof = newDNSSpoof(r, e.cfg.MaxKeys, &e.tables[tDNSSpoof])
+		case DetectDNSAmplification:
+			st.amp = newDNSAmp(r, e.cfg.MaxKeys, &e.tables[tDNSAmp])
+		case DetectDNSTunnel:
+			st.dnsTun = newDNSTunnel(r, e.cfg.MaxKeys, &e.tables[tDNSTunnel])
+		case DetectNXDomainBurst:
+			st.nx = newNXBurst(r, e.cfg.MaxKeys, &e.tables[tNXDomain])
 		}
 		states[i] = st
 	}
@@ -356,6 +394,18 @@ func (e *Engine) activate(rs *RuleSet) {
 		if st.tunnel != nil {
 			st.tunnel.clear()
 		}
+		if st.spoof != nil {
+			st.spoof.clear()
+		}
+		if st.amp != nil {
+			st.amp.clear()
+		}
+		if st.dnsTun != nil {
+			st.dnsTun.clear()
+		}
+		if st.nx != nil {
+			st.nx.clear()
+		}
 	}
 	if !rs.handshakes {
 		e.hs.clear()
@@ -372,6 +422,9 @@ func (e *Engine) activate(rs *RuleSet) {
 	}
 	if !rs.echoReqs {
 		e.echoReqs.clear()
+	}
+	if !rs.dnsQueries {
+		e.dnsQueries.clear()
 	}
 	e.activateSlow(rs)
 	e.active, e.ruleState = rs, states
@@ -423,6 +476,9 @@ func (e *Engine) Process(p *packet.ParsedPacket) []Alert {
 	}
 	if len(rs.slow) > 0 {
 		out = e.slowloris(rs, p, &v, out)
+	}
+	if len(rs.dns) > 0 && p.AppProtocol == packet.AppDNS && (v.g == gUDP || v.g == gTCP) {
+		out = e.dns(rs, p, &v, out)
 	}
 
 	switch {
@@ -742,6 +798,70 @@ func (e *Engine) udpFloods(rs *RuleSet, p *packet.ParsedPacket, v *view, out []A
 		}
 		if key, details, fired := e.ruleState[r.idx].udp.forward(p, v, e.now); fired {
 			out = e.emit(r, dedupKey{sid: r.SID, addr: key}, v, details, out)
+		}
+	}
+	return out
+}
+
+// dns runs the DNS detectors for one DNS packet, UDP or a reassembled
+// TCP segment, message by message. Queries enter the outstanding query
+// table and responses are matched against it whether or not the packet
+// is whitelisted or passed, so that the table knows every query; the
+// rules only see packets that are neither.
+func (e *Engine) dns(rs *RuleSet, p *packet.ParsedPacket, v *view, out []Alert) []Alert {
+	e.dnsBuf = dnsMessages(p, e.dnsBuf[:0])
+	if len(e.dnsBuf) == 0 {
+		return out
+	}
+	skip := e.isWhitelisted(v.src) || e.passes(rs, v)
+	for i := range e.dnsBuf {
+		m := &e.dnsBuf[i]
+		if !m.response {
+			tx := dnsTx{client: v.src, server: v.dst, cport: v.sport, id: m.id}
+			if rs.dnsQueries {
+				e.dnsQueries.query(tx, m, e.now)
+			}
+			if skip {
+				continue
+			}
+			for _, r := range rs.dns {
+				st := e.ruleState[r.idx]
+				if st.dnsTun == nil || !r.matchAddrs(v) {
+					continue
+				}
+				if key, details, fired := st.dnsTun.query(v.src, m, e.now); fired {
+					out = e.emit(r, dedupKey{sid: r.SID, addr: key.client, peer: v.dst}, v, details, out)
+				}
+			}
+			continue
+		}
+		tx := dnsTx{client: v.dst, server: v.src, cport: v.dport, id: m.id}
+		outcome, qsize, asked := dnsUnsolicited, uint64(0), false
+		if rs.dnsQueries {
+			outcome, qsize = e.dnsQueries.answer(tx, m, e.now)
+			asked = outcome == dnsUnsolicited && m.qname != "" && e.dnsQueries.asked(tx, m.qname)
+		}
+		if skip {
+			continue
+		}
+		for _, r := range rs.dns {
+			if !r.matchAddrs(v) {
+				continue
+			}
+			st := e.ruleState[r.idx]
+			var details func() map[string]string
+			fired := false
+			switch {
+			case st.spoof != nil:
+				details, fired = st.spoof.response(tx, m, outcome, asked, e.now)
+			case st.amp != nil:
+				details, fired = st.amp.response(tx, m, outcome, qsize, e.now)
+			case st.nx != nil:
+				details, fired = st.nx.response(tx.client, m, e.now)
+			}
+			if fired {
+				out = e.emit(r, dedupKey{sid: r.SID, addr: tx.client}, v, details, out)
+			}
 		}
 	}
 	return out

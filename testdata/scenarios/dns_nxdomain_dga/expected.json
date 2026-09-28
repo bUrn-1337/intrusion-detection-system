@@ -1,0 +1,7 @@
+{
+  "description": "40 lookups of random 14-letter .com names in 20s, all NXDOMAIN, like a DGA looking for its server. dns_nxdomain_burst fires at 30 names, most with high-entropy labels.",
+  "alerts": [
+    {"sid": 1000110, "kind": "alert", "src_ip": "192.0.2.53", "dst_ip": "10.0.0.5", "count": [1, 1], "details": {"nxdomain_names": "30", "tracked_addr": "10.0.0.5"}},
+    {"sid": 1000110, "kind": "summary", "count": [5, 11]}
+  ]
+}

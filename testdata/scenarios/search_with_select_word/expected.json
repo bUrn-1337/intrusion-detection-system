@@ -1,0 +1,4 @@
+{
+  "description": "Searches for \"select shoes union jack\", \"how to select from a union catalog\" and \"sleep mask and pillow\". They contain SQL words but no injection syntax: nothing fires.",
+  "alerts": []
+}

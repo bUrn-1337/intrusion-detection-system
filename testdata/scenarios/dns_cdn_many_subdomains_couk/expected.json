@@ -1,0 +1,4 @@
+{
+  "description": "10.0.0.5 looks up long random-looking CDN hosts of 70 sites under co.uk and 30 under github.io, plus 60 image hosts of one shop. By registered domain (eTLD+1) no domain has many high-entropy subdomains; grouped by the last two labels, co.uk would. Nothing fires.",
+  "alerts": []
+}

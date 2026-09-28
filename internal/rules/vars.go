@@ -6,8 +6,9 @@ import (
 	"strings"
 )
 
-// Rule file variables: "var NAME value" lines define an address or port
-// value, used as $NAME in a rule's address and port fields and in other
+// Rule file variables: "var NAME value" lines define an address, port or
+// domain name value, used as $NAME in a rule's address and port fields,
+// in options that take a name list (app_domain, allow) and in other
 // variables. Definitions may come in any order. A reference is replaced
 // by the variable's text:
 //
@@ -28,6 +29,7 @@ type variable struct {
 	value string // raw with every reference expanded; valid when state == varDone and !bad
 	addr  bool   // value is a valid address spec
 	port  bool   // value is a valid port spec
+	names bool   // value is a valid name list
 	state uint8
 	bad   bool  // the definition has an error
 	err   error // the resolution error, reported on line
@@ -133,7 +135,11 @@ func (vs varTable) resolve(name string, path []string) error {
 		_, perr := parsePortSpec(value)
 		v.value, v.addr, v.port = value, aerr == nil, perr == nil
 		if !v.addr && !v.port {
-			err = fmt.Errorf("%q is neither an address value (%v) nor a port value (%v)", value, aerr, perr)
+			_, nerr := parseNameList(value)
+			v.names = nerr == nil
+			if !v.names {
+				err = fmt.Errorf("%q is neither an address value (%v), a port value (%v) nor a name list (%v)", value, aerr, perr, nerr)
+			}
 		}
 	}
 	if err != nil {
@@ -142,9 +148,9 @@ func (vs varTable) resolve(name string, path []string) error {
 	return err
 }
 
-// expand replaces every $NAME reference in field. kind is "address" or
-// "port" for a rule field, which each referenced variable must hold, or
-// "" inside a variable's value. path is non-nil only inside resolve.
+// expand replaces every $NAME reference in field. kind is "address",
+// "port" or "name" for a rule field or name list option, which each
+// referenced variable must hold, or "" inside a variable's value. path is non-nil only inside resolve.
 func (vs varTable) expand(field, kind string, path []string) (string, error) {
 	if !strings.Contains(field, "$") {
 		return field, nil
@@ -170,9 +176,11 @@ func (vs varTable) expand(field, kind string, path []string) (string, error) {
 		}
 		switch {
 		case kind == "address" && !v.addr:
-			return "", fmt.Errorf("%s holds ports, not addresses", ref)
+			return "", fmt.Errorf("%s holds %s, not addresses", ref, v.holds())
 		case kind == "port" && !v.port:
-			return "", fmt.Errorf("%s holds addresses, not ports", ref)
+			return "", fmt.Errorf("%s holds %s, not ports", ref, v.holds())
+		case kind == "name" && !v.names:
+			return "", fmt.Errorf("%s holds %s, not names", ref, v.holds())
 		}
 		return v.value, nil
 	}
@@ -238,4 +246,69 @@ func isVarName(s string) bool {
 		}
 	}
 	return true
+}
+
+// holds names what a valid variable's value is, for errors.
+func (v *variable) holds() string {
+	switch {
+	case v.addr && v.port:
+		return "any"
+	case v.addr:
+		return "addresses"
+	case v.port:
+		return "ports"
+	}
+	return "names"
+}
+
+// maxNames bounds the items of a name list.
+const maxNames = 1000
+
+// parseNameList parses a domain name list: one name or [name,name,...].
+// Names are lowercased and lose a trailing dot. Each is a DNS name of
+// letters, digits, '-' and '_' labels with at least one letter, so that
+// an address or port list is never taken for one; '!' and "any" are not
+// allowed.
+func parseNameList(s string) ([]string, error) {
+	items := []string{s}
+	if strings.HasPrefix(s, "[") {
+		if !strings.HasSuffix(s, "]") || len(s) < 3 {
+			return nil, fmt.Errorf("bad list %q", s)
+		}
+		items = strings.Split(s[1:len(s)-1], ",")
+	}
+	if len(items) > maxNames {
+		return nil, fmt.Errorf("more than %d names", maxNames)
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		n := strings.TrimSuffix(strings.ToLower(it), ".")
+		if !isDomainName(n) {
+			return nil, fmt.Errorf("%q is not a domain name", it)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+func isDomainName(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	letter := false
+	for _, l := range strings.Split(s, ".") {
+		if l == "" || len(l) > 63 {
+			return false
+		}
+		for i := 0; i < len(l); i++ {
+			switch c := l[i]; {
+			case 'a' <= c && c <= 'z':
+				letter = true
+			case '0' <= c && c <= '9', c == '-', c == '_':
+			default:
+				return false
+			}
+		}
+	}
+	return letter
 }

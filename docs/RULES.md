@@ -96,6 +96,24 @@ alert tcp any any -> [$HOME_NET,!10.0.0.1] 22 (msg:"SSH to home except the jump 
   cycle (including a variable that refers to itself) are load errors,
   reported as `file:line`.
 
+A value that is neither an address nor a port spec is a **name list**: one
+domain name or `[a,b,...]` of them (letters, digits, `-` and `_`, labels
+of 1 to 63 characters, at least one letter, at most 1000 names). Names are
+lowercased and a trailing dot is dropped. A name list is used by
+`app_domain` and by the `allow` option of `detect:dns_tunnel`, never in
+an address or port field (`$N holds names, not addresses`). Name lists
+can splice other name lists but cannot be negated.
+
+```
+var DOH_SERVERS [dns.google,cloudflare-dns.com,one.one.one.one]
+alert tcp any any -> any 443 (msg:"DoH"; app_proto:tls; app_domain:sni,$DOH_SERVERS; sid:1000111;)
+```
+
+Name lists are variables rather than a separate `list` directive so that
+one mechanism covers every reusable value: they are defined, spliced,
+checked for cycles and reported the same way, and a rule that uses one is
+reset on a reload when the list changes, like an address variable.
+
 `rules.conf` defines `HOME_NET` (RFC 1918, loopback, and IPv6 ULA and
 link-local) and `EXTERNAL_NET` (`!$HOME_NET`). Edit `HOME_NET` for your
 network. `detect:ttl_anomaly` with `scope:external` reads `$HOME_NET`.
@@ -286,17 +304,96 @@ alert tcp any any -> any any (msg:"TLS without SNI"; app_proto:tls; app_field:sn
 | protocol | fields |
 |---|---|
 | dns | `id`, `is_response`, `rcode`, `qdcount`, `ancount`, `nscount`, `arcount`, `dns_len`, `qname`, `qtype`, `qtype_name`, `qclass` (first question only) |
-| http | requests: `method`, `uri`, `uri_decoded`, `version`, `request_complete`; responses: `status_code`; headers: `host`, `user_agent`, `content_type`, `content_length`, `auth_basic` |
+| http | requests: `method`, `uri`, `uri_decoded`, `query`, `version`, `request_complete`; responses: `status_code`; headers: `host`, `user_agent`, `content_type`, `content_length`, `auth_basic`, `headers_raw` |
 | ftp | `command`, `argument` (the PASS argument is always `<redacted>`), `response_code` |
 | tls | `sni`, `sni_status` (`found`, `absent`, `truncated`) |
 
+HTTP fields in detail:
+
+- `uri_decoded`: the URI percent-decoded once, then overlong UTF-8
+  sequences replaced by the character they encode (`%c0%ae` is `.`,
+  `%c0%af` is `/`). Overlong forms are invalid UTF-8 that old decoders
+  (IIS 4/5, CVE-2000-0884) accepted, so `/%c0%ae%c0%ae/` walked out of the
+  web root past filters looking for `../`. The 2-, 3- and 4-byte overlong
+  forms are all decoded; each one also records the suspicious reason
+  `overlong utf-8 encoding`.
+- `query`: the part of the URI after the first `?` and before any `#`,
+  with `+` turned into a space and then percent-decoded once. Absent
+  without a `?`. SQL injection and command injection rules read this, so
+  `select+shoes` is `select shoes`.
+- `headers_raw`: every header line of the request or response, joined by
+  `\n`, cut at 8 KiB. The values of `Authorization` and
+  `Proxy-Authorization` are replaced by `<redacted>`, so credentials never
+  reach a rule, an alert or the log. For Log4Shell and Shellshock, whose
+  payloads can hide in any header.
+
 Reasons the parsers can record include `double percent-encoding`
 (suspicious, http: decoding the URI a second time reveals a `../`, `..\`
-or NUL byte; double encoding alone is not flagged), `long high-entropy label (possible DNS tunnelling)`
-(suspicious, dns), and `qname: compression loop: pointer does not point
-backwards`, `query has no questions` and `invalid request line`
-(malformed). `app_reason` matches the kind only; the text is for people. Credentials are never stored: the HTTP
-`Authorization` header only sets `auth_basic=true`.
+or NUL byte; double encoding alone is not flagged), `overlong utf-8
+encoding` (suspicious, http), `long high-entropy label (possible DNS
+tunnelling)` (suspicious, dns), and `qname: compression loop: pointer
+does not point backwards`, `query has no questions` and `invalid request
+line` (malformed). `app_reason` matches the kind only; the text is for
+people, and `app_content:suspicious_reason,"..."` matches the text.
+Credentials are never stored: the HTTP `Authorization` header only sets
+`auth_basic=true`.
+
+### app_content
+
+`app_content:KEY,"text";` is a substring of the application field KEY
+(any key from the table above, or `malformed_reason` /
+`suspicious_reason`). The string takes the same `|hex|` and escapes as
+`content`. `app_content:KEY,"text",nocase;` ignores ASCII case.
+Repeatable; all must match, and like `app_field` they must all match the
+same message of a packet. A missing field never matches.
+
+```
+alert tcp any any -> any any (msg:"sqlmap"; app_proto:http; app_content:user_agent,"sqlmap",nocase; sid:1000930;)
+```
+
+### app_domain
+
+`app_domain:KEY,NAMES;` matches when field KEY is one of NAMES or a
+subdomain of one, ignoring case and a trailing dot. NAMES is a domain
+name, a `[a,b]` list, or a name-list variable. `dns.google` matches
+`dns.google` and `x.dns.google`, but not `evildns.google`. Repeatable.
+
+```
+alert tcp any any -> any 443 (msg:"DoH"; app_proto:tls; app_domain:sni,$DOH_SERVERS; sid:1000111;)
+```
+
+### regex
+
+`regex:KEY,"pattern";` searches application field KEY with a Go
+regular expression (RE2 syntax). `regex:data,"pattern";` searches the
+application data: the messages the packet completed, or its payload if it
+completed none (the same two places `content` looks). `regex:data` is
+valid on any IP rule; field regexes need `ip`, `tcp` or `udp`.
+Repeatable; all must match.
+
+- Case: write `(?i)` in the pattern. `nocase` is rejected, so it is never
+  silently ignored.
+- Quoting: the pattern is a quoted string, so write `\"` for a quote and
+  `\;` for a semicolon; every other backslash is passed to the regex as
+  is (`\d`, `\b`, `\.`).
+- Errors (a bad pattern, an empty one, an unknown key form) are load
+  errors with the file and line.
+- Cost: RE2 guarantees time linear in the input, with no backtracking.
+  Patterns such as `(a+)+$` that make a backtracking engine (PCRE, as in
+  Snort and Suricata) take exponential time on a crafted input (ReDoS)
+  run in linear time here. The price is no backreferences (`\1`) and no
+  lookaround (`(?=...)`, `(?<!...)`). Each evaluation reads at most the
+  first 16 KiB of the field or data, so its cost is bounded by a constant
+  whatever a packet carries. A match that starts inside the first 16 KiB
+  but ends after it is missed.
+
+```
+alert tcp any any -> any any (msg:"UNION SELECT"; app_proto:http; regex:query,"(?i)\bunion\s+select\b"; sid:1000931;)
+alert tcp any any -> any any (msg:"Shellshock"; app_proto:http; regex:headers_raw,"\(\)\s*\{"; sid:1000932;)
+```
+
+Content, app_content and app_domain are checked before regexes, so a
+cheap literal in the same rule keeps the regex off most packets.
 
 ### stream_anomaly
 
@@ -693,6 +790,147 @@ Details: `detector`, `kind`, `track`, `tracked_addr`, `flows`, `count`,
 `distinct_targets`, `clients`, `sample_flow_ids` (up to 5), and
 `seconds`, `min_rate` and `min_remaining` where they apply.
 
+### DNS detectors
+
+Four detectors read DNS messages, over UDP and over TCP (every message of
+a reassembled segment). They are valid on `ip`, `tcp` and `udp` alert
+rules. The rule's addresses and ports are matched against the packet: a
+query goes client to server, a response server to client. The whitelist
+and pass rules apply to the packet's source.
+
+**The outstanding query table.** For `dns_spoof` and
+`dns_amplification` the engine records every query (whitelisted and
+passed ones included) under its transaction: client address and port,
+server address, and DNS id, with the question (name, lowercased, and
+type) and the query size. A response is looked up by the reversed
+transaction and is then one of:
+
+- *matched*: a question of its transaction has the same name and type.
+  That question is removed, so a second copy of the answer is
+  unsolicited. A response without a question matches the oldest one.
+- *mismatch*: its transaction has questions waiting, none of them its
+  own.
+- *unsolicited*: nothing is waiting for its transaction.
+
+A question is forgotten 10 s after it was last sent (stub resolvers give
+up after about 5 s); a retransmission refreshes it. At most 8 questions
+wait per transaction and the table holds at most the engine's key limit
+of transactions, dropping the least recently queried (counted in the
+`dns_queries` table statistics).
+
+#### detect:dns_spoof
+
+| kind | fires on | options |
+|---|---|---|
+| `unsolicited_response` | `count` unsolicited responses to one client within `seconds`. One now and then is normal (a late answer after a retry, a server answering a retransmission twice) | `count:N; seconds:S;` required |
+| `id_race` | `count` distinct ids among unsolicited responses for one (client, server, name) within `seconds`, while the client has a question for that name waiting at that server (on any port and id): forged answers racing the real one, each guessing an id (the Kaminsky attack). Only unsolicited responses count, so a client asking one name over and over and getting answers never fires; and a reflection victim, flooded with answers to queries it never sent, has no question waiting, so it gets `unsolicited_response` and `dns_amplification` but not this | `count:N; seconds:S;` required, `count` at most 1000 |
+| `qname_mismatch` | one response whose client, ports and id match a waiting query but whose question does not: an answer forged for the wrong query, or a broken server | none |
+
+The capture must see the queries: on a sensor that sees only responses
+(asymmetric routing) every response is unsolicited. A reflection
+attack also fires `unsolicited_response` next to `dns_amplification`:
+the victim receives many answers it did not ask for, which is what that
+kind counts. Resolvers randomize
+letter case (DNS 0x20); names are compared lowercased.
+
+Details: `detector`, `kind`, `client`, `server`, `qname`, `id`, and
+`responses`, `seconds` and `window` (unsolicited_response),
+`distinct_ids` and `seconds` (id_race), `client_port` (qname_mismatch).
+Alerts are deduplicated per (sid, client).
+
+#### detect:dns_amplification
+
+Per victim (the address responses go to) it sums over `seconds` the
+response bytes, the bytes of the queries they matched, and the bytes of
+unsolicited or mismatched responses. Reflection spoofs the victim's
+address in small queries (ANY, DNSSEC, big TXT) sent to open resolvers,
+so the victim receives large answers to queries it never sent. It fires
+when:
+
+- `unmatched`: unmatched response bytes reach `min_bytes`, or
+- `ratio`: response bytes reach `min_bytes` and are at least `min_ratio`
+  times the matched query bytes.
+
+| option | meaning |
+|---|---|
+| `min_bytes:N;` | required, up to 2^40 |
+| `seconds:S;` | required |
+| `min_ratio:F;` | 1 to 1000000, default 10. An ordinary answer is 2 to 5 times its query; ANY and DNSSEC answers used for reflection are 30 to 100 times |
+
+Sizes are the DNS message length (`dns_len`). The window works like
+`udp_flood`'s: 10 sub-buckets, fixed memory per victim. `rules.conf` also
+has a plain rule for repeated ANY queries from one source. RFC 8482
+(2019) lets servers answer ANY with a single small record, and most large
+resolvers do, so one ANY query means little and the rule waits for 20
+within 10 s.
+
+Details: `detector`, `track` (`by_dst`), `tracked_addr`, `reason`,
+`response_bytes`, `query_bytes`, `unmatched_bytes`, `ratio` (with matched
+queries), `min_bytes`, `min_ratio`, `top_qtype` and `seconds`.
+
+#### detect:dns_tunnel
+
+Looks at queries per (client, registered domain). The registered domain
+is the name's effective TLD plus one label by the Public Suffix List
+(`golang.org/x/net/publicsuffix`), not its last two labels: those would
+be `co.uk` for `www.bbc.co.uk`, lumping every British company into one
+domain, and `github.io` for `alice.github.io`, one domain for every
+GitHub Pages site. Counting subdomains per `co.uk` would make a busy
+browser look like a tunnel. Names that are a public suffix themselves
+are skipped. The subdomain is everything left of the registered domain.
+
+| kind | fires on | options |
+|---|---|---|
+| `subdomains` | `count` distinct subdomains within `seconds` whose average Shannon entropy is at least `min_entropy` bits per character or whose average length is at least `min_length` (dots removed) | `count:N; seconds:S;` required (`count` at most 1000); `min_entropy:F;` 0 to 8, default 3.5; `min_length:N;` default 50 |
+| `txt` | `count` TXT or NULL queries within `seconds`: the record types tunnels use to bring data back | `count:N; seconds:S;` required |
+
+`allow:NAMES;` (either kind) skips registered domains that are one of
+NAMES or under one. Data encoded into names (iodine, dnscat2, DNS
+exfiltration) makes every query a new, long, random-looking subdomain;
+hostnames people pick are short and repeat letters. Entropy is measured
+per character of the subdomain, so a short label cannot reach a high
+value (a 16-character label has at most 4 bits).
+
+`rules.conf` passes `$DNS_TUNNEL_ALLOW`, the reverse-lookup zones
+`in-addr.arpa` and `ip6.arpa`: a host resolving many peers' addresses
+asks for many distinct numeric names under one zone.
+
+Details: `detector`, `kind`, `client`, `registered_domain`, `seconds`,
+and for `subdomains` `unique_subdomains`, `avg_entropy`, `avg_length`,
+`txt_null_cname_mx` (share of those query types), `sample_qnames` (the
+last 3), `min_entropy` and `min_length`; for `txt` `txt_null_queries` and
+`sample_qnames`. Alerts are deduplicated per (sid, client, server).
+
+#### detect:dns_nxdomain_burst
+
+Per client, the distinct names answered NXDOMAIN (rcode 3) within
+`seconds`. It fires when `count` are distinct and at least half have a
+leftmost label with `min_entropy` bits per character (default 3.0):
+malware with a domain generation algorithm (DGA) tries many random names
+until one resolves. Typos (`gooogle.com`) and a broken search domain
+(`printer.corp.example.com`) also fail in bursts, but on word-like names.
+`count:N; seconds:S;` are required, `count` at most 1000.
+
+Details: `detector`, `track` (`by_dst`), `tracked_addr`,
+`nxdomain_names`, `high_entropy_names`, `min_entropy`, `seconds` and
+`sample_qname`.
+
+### DoH and DoT
+
+DNS over HTTPS and over TLS bypass the local resolver, and with it any
+DNS monitoring and filtering, including the detectors above. `rules.conf`
+reports them as policy (severity low):
+
+- DoH: a TLS ClientHello whose SNI is in `$DOH_SERVERS`, the public DoH
+  endpoints documented by Google (`dns.google`), Cloudflare
+  (`cloudflare-dns.com`, `one.one.one.one`), Quad9 (`dns.quad9.net`),
+  OpenDNS/Cisco (`doh.opendns.com`, `doh.familyshield.opendns.com`,
+  `doh.umbrella.com`), AdGuard and NextDNS. Subdomains match, so
+  `cloudflare-dns.com` also covers `security.cloudflare-dns.com` and
+  `mozilla.cloudflare-dns.com`. A DoH server on a name not in the list, or
+  a client using Encrypted Client Hello, is not seen.
+- DoT: any TCP SYN to port 853.
+
 Detector rules cannot use `flags`, `content`, `app_*`, `stream_anomaly`,
 `detection_filter`, `same_ip`, `same_port`, `eth_dst`, `itype`, `icode`,
 `ttl`, `arp_op` or `dsize`.
@@ -705,7 +943,8 @@ Detector rules cannot use `flags`, `content`, `app_*`, `stream_anomaly`,
 3. Dedup: the first firing per (sid, address) is logged as an `alert`
    (per (sid, address, port) for `host_sweep`, per (sid, address, MAC)
    for `arp_spoof` `unsolicited_reply`, per (sid, MAC) for
-   `multi_ip`, and per (sid, client, server) for `icmp_tunnel`) with
+   `multi_ip`, per (sid, client, server) for `icmp_tunnel` and
+   `dns_tunnel`, and per (sid, client) for `dns_spoof`) with
    count 1. The address is the tracked one for `detection_filter` and
    `detect` rules, otherwise the packet's source. Later firings within 60 s
    of the first are folded into one `summary`, logged when the window

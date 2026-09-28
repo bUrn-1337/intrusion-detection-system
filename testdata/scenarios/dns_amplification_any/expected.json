@@ -1,0 +1,8 @@
+{
+  "description": "203.0.113.66 sends 30 ANY queries to the resolver in 12s, next to a client's ordinary lookups. The ANY rule fires at the 20th and summarizes the rest; the answers are small, so dns_amplification does not.",
+  "alerts": [
+    {"sid": 1000107, "kind": "alert", "src_ip": "203.0.113.66", "dst_ip": "192.0.2.53", "count": [1, 1]},
+    {"sid": 1000107, "kind": "summary", "count": [10, 11]}
+  ],
+  "absent_sids": [1000106]
+}

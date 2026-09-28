@@ -1,0 +1,8 @@
+{
+  "description": "120 TXT queries in 36s to c2.tunnel-test.example with short sequence-numbered names (a command channel polling). The txt kind fires at 100; the names are too short and low in entropy for the subdomains kind.",
+  "alerts": [
+    {"sid": 1000109, "kind": "alert", "src_ip": "10.0.0.5", "count": [1, 1], "details": {"kind": "txt", "registered_domain": "tunnel-test.example", "txt_null_queries": "100"}},
+    {"sid": 1000109, "kind": "summary", "count": [15, 21]}
+  ],
+  "absent_sids": [1000108]
+}

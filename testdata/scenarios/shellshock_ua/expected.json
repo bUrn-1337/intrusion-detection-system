@@ -1,0 +1,6 @@
+{
+  "description": "User-Agent: () { :; }; /bin/bash -c 'id' to a CGI path. The Shellshock rule fires once.",
+  "alerts": [
+    {"sid": 1000222, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "dst_port": 80, "count": [1, 1]}
+  ]
+}

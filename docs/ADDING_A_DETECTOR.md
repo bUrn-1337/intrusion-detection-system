@@ -1,8 +1,8 @@
 # Adding a detector
 
 A detector is a stateful check that a single-packet rule cannot express,
-switched on with `detect:NAME;` in a rule. There are eleven so far, in
-eight shapes; copy the one closer to yours:
+switched on with `detect:NAME;` in a rule. There are fifteen so far, in
+nine shapes; copy the one closer to yours:
 
 - `syn_flood` ([synflood.go](../internal/rules/synflood.go)) counts
   events per key in a sliding window: "N incomplete handshakes within S
@@ -38,6 +38,15 @@ eight shapes; copy the one closer to yours:
   per tracked address of the connections that currently qualify. Its
   conditions are about time passing with no packet, so every entry has a
   due time in a heap, checked on every packet and in `Flush`.
+- `dns_spoof`, `dns_amplification`, `dns_tunnel` and
+  `dns_nxdomain_burst` ([dns.go](../internal/rules/dns.go)) read DNS
+  messages. An engine-wide outstanding query table, fed by every query
+  whatever the rules say, classifies each response as matched,
+  mismatched or unsolicited; the rules then count those outcomes
+  (`windowCounter`), distinct ids or names (`distinctCounter`, with a
+  per-value entropy or a caller bit), or response and query bytes
+  (`rateCounter`). Grouping by domain uses the registered domain
+  (eTLD+1 from the Public Suffix List), never "the last two labels".
 
 The example new detector here is `conn_burst` (a made-up name: many
 connections from one source); replace it with yours.
@@ -82,6 +91,10 @@ started before the IDS. Each look-alike becomes a scenario in step 7.
 - A new top-level directive (like `arpbind IP MAC`) is parsed from the
   raw lines before the rules, skipped by the rule loop, and reports
   `file:line` errors the same way (see `parseARPBinds`).
+- An option that takes a list of names (dns_tunnel's `allow`) takes a
+  name-list variable (`allow:$DNS_TUNNEL_ALLOW;`), resolved by the
+  parser like address and port variables, so the list lives once at the
+  top of rules.conf.
 - Keep limits on every number (`parsePositive(v, maxCount)`). An unbounded
   count is a memory bug waiting for a rule typo.
 - Add parse tests for the good rule and each error (unknown option, missing
@@ -163,6 +176,10 @@ In `engine.go`:
   - ARP packets, in `arp` (called from `Process` when `rs.arp` is not
     empty): it feeds the shared ARP tables first, then applies the
     whitelist, pass rules and each rule's addresses.
+  - DNS messages, in `dns` (called from `Process` for `AppDNS` packets
+    when `rs.dns` is not empty): each query goes into the query table and
+    each response is looked up there before the whitelist and pass
+    checks, then the rules run on the outcome.
   - Shared trackers that must see every packet whatever the rules say:
     the fragment tracker runs before the whitelist and pass checks so its
     state does not depend on them, and `fragments` applies them to each
@@ -220,7 +237,8 @@ and one look-alike that must not. For syn_flood these are
 `completed_handshakes_busy` and `scan_is_not_flood`; for port_scan,
 `vertical_syn_scan`, `udp_scan`, `flood_is_not_scan` and
 `browsing_many_hosts`; for slowloris, `slowloris_slow_headers` and
-`browser_keepalive_idle`. Write the generators with `pcapgen` in
+`browser_keepalive_idle`; for dns_tunnel, `dns_tunnel_base32` and
+`dns_cdn_many_subdomains_couk`. Write the generators with `pcapgen` in
 [cmd/ids/scenario_gen_test.go](../cmd/ids/scenario_gen_test.go) and match
 on `details` in expected.json. A scenario that needs extra rule
 lines (an `arpbind`, a pass rule for the look-alike) lists them in
