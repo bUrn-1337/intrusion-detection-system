@@ -27,7 +27,6 @@ bin/ids query -severity high       # read the alert log
 | [docs/ADDING_A_DETECTOR.md](docs/ADDING_A_DETECTOR.md) | step-by-step template for a new stateful detector |
 | [docs/SCENARIOS.md](docs/SCENARIOS.md) | end-to-end alert tests and how to add one |
 | [docs/DEMO.md](docs/DEMO.md) | running the IDS live between two machines, and the offline replay |
-| [docs/REPORT-CONTENT.md](docs/REPORT-CONTENT.md) | write-up material: architecture, design deep-dives, results |
 
 ## Pipeline
 
@@ -355,15 +354,59 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the branch workflow.
 All six modules are complete. The shared `internal/packet` contract is imported
 by every module and imports nothing internal; `cmd/ids` wires the pipeline.
 
-| # | Module              | Package                 | Status | Owner |
-|---|---------------------|-------------------------|--------|-------|
-| 1 | Packet capture      | `internal/capture`      | Done   | _TBD_ |
-| 2 | Ethernet/IP parsing | `internal/parser/lower` | Done   | _TBD_ |
-| 3 | TCP/UDP/ICMP parsing| `internal/parser/upper` | Done   | _TBD_ |
-| 4 | HTTP/DNS/FTP parsing | `internal/parser/app`  | Done   | _TBD_ |
-| 5 | Rule engine + correlation | `internal/rules`, `internal/stream`, `internal/intel` | Done | _TBD_ |
-| 6 | Dashboard + logging | `internal/logging`      | Done   | _TBD_ |
+| Area | Primary owner | Enrollment | Also contributed |
+|---|---|---|---|
+| Capture engine, logging & dashboard (`internal/capture`, `internal/logging`, TUI) | Daddi Om Santosh | 24114028 | — |
+| Lower-layer parsers + fragmentation & ARP detectors (`internal/parser/lower`) | Deokar Parth Rajesh | 24114032 | — |
+| Upper-layer parsers, TCP stream reassembly + scan/flood detectors (`internal/parser/upper`, `internal/stream`) | Aditya Pratap Singh Bhadoria | 24114005 | Aditya Ranjan |
+| Application parsers + web-attack & DNS detectors (`internal/parser/app`) | Aditya Ranjan | 24114006 | Satyam Sharma |
+| Rule engine, rule language, detection framework + correlation/incidents (`internal/rules`) | Satyam Sharma | 24114088 | Kothawade Manthan |
+| Threat-intel feeds, beaconing/baseline/anomaly detectors + test harness (`internal/intel`, `internal/entropy`, scenarios/fuzz/CI) | Kothawade Manthan | 24114050 | — |
 
-<!-- Owners are placeholders: fill in each module's owner (the team lead has the
-     assignment). Update the same table in docs/REPORT-CONTENT.md to match. -->
+## Contributions
+
+**Daddi Om Santosh (24114028)** built the capture engine (`internal/capture`): the
+live AF_PACKET/pcap path and the `.pcap` replay reader, snaplen and promiscuous
+handling, the capture ring with its drop-when-full-vs-wait policy, and the
+kernel/queue drop accounting. He also owns the output side end to end — the JSONL
+logger with size-based rotation (`internal/logging`) and the live terminal
+dashboard (`internal/logging/tui`) with its rolling top-N tables and pause/resume.
+
+**Deokar Parth Rajesh (24114032)** owns the lower-layer parser
+(`internal/parser/lower`): Ethernet, VLAN-tag walking, IPv4/IPv6 with the IPv6
+extension-header chain and fragmentation fields, and ARP decoding. He built the
+detectors that key on those layers — the fragmentation/evasion signatures
+(teardrop sid 1000701, ping-of-death sid 1000703), the ARP cache-poisoning
+detectors (sid 1000802–1000804), and the IP TTL-anomaly spoofing check (sid 1000601).
+
+**Aditya Pratap Singh Bhadoria (24114005)** owns the upper-layer parser
+(`internal/parser/upper`, TCP/UDP/ICMP) and the TCP stream-reassembly stage
+(`internal/stream`) — the handshake table, application-port flows, and the
+overlap-conflict handling that underpins evasion resistance. On top of that he
+built the scan and volumetric-flood detectors: vertical/horizontal scans (sid
+1000401/1000402) and the SYN/UDP/ICMP/LAND floods (sid 1000001/1000012/1000022/1000003).
+His reassembled streams also feed Aditya Ranjan's application parsers.
+
+**Aditya Ranjan (24114006)** owns the application parsers (`internal/parser/app`:
+HTTP, DNS, FTP, TLS/JA3) and the web and DNS detectors that run on them:
+SQL-injection, XSS, path traversal, command injection, Log4Shell and Shellshock
+(sid 1000210–1000223, including the overlong-UTF-8 URI normaliser), the FTP
+brute-force check (sid 1000301), and the DNS zone-transfer, amplification, tunnel
+and DGA/NXDOMAIN signatures (sid 1000101–1000110). These detectors are expressed
+on Satyam Sharma's shared rule framework.
+
+**Satyam Sharma (24114088)** built the detection core: the rule engine and rule
+language (`internal/rules`, `rules.conf`), the stateful-detector framework every
+other detector plugs into, the packet-time deterministic clock, and the
+spoofable-vs-reliable attribution model. He owns correlation and incident
+construction — the multi-stage kill-chain and callback logic (sid 1001301/1001303)
+with its framing resistance, so a spoofed source cannot manufacture an incident.
+
+**Kothawade Manthan (24114050)** owns threat-intel matching (`internal/intel`:
+IP/domain/JA3 feeds, sid 1001001–1001003) and the behavioural detectors —
+periodic C2 beaconing (sid 1001101), the statistical host-fanout baseline/anomaly
+(sid 1001201), and the entropy engine (`internal/entropy`) behind DGA and tunnel
+scoring. He also built the test harness that holds the project together: the
+scenario runner and its 145 fixtures, the fuzz targets, the false-positive corpus
+and CI.
 
