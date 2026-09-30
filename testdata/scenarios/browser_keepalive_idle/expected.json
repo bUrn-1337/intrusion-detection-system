@@ -1,0 +1,6 @@
+{
+  "description": "A browser keeps 50 keep-alive connections to one server open for 60 s after complete requests and responses, with TCP keep-alives. No request is in progress on any of them, so no slow HTTP rule counts them.",
+  "alerts": [],
+  "absent_sids": [1000030, 1000031, 1000032, 1000033],
+  "stream_stats": {"overlap_conflicts": [0, 0], "desyncs": [0, 0], "flows": [0, 0], "messages": [100, 100], "closed": [50, 50]}
+}

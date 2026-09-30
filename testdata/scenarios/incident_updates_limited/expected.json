@@ -1,0 +1,35 @@
+{
+  "description": "A scan, then 105 Log4Shell requests 61s apart (each alerts) and 100 connections from the victim to c2.example.net: over 200 contributing alerts. Exactly one multi_stage incident, one update (c2 gained), and one compromised_host incident; nothing more.",
+  "alerts": [
+    {
+      "sid": 1001301,
+      "kind": "incident",
+      "src_ip": "203.0.113.9",
+      "dst_ip": "10.0.0.80",
+      "details": {
+        "chain": "recon -> exploit"
+      }
+    },
+    {
+      "sid": 1001301,
+      "kind": "incident_update",
+      "src_ip": "203.0.113.9",
+      "dst_ip": "10.0.0.80",
+      "details": {
+        "chain": "recon -> exploit -> c2"
+      }
+    },
+    {
+      "sid": 1001302,
+      "kind": "incident",
+      "src_ip": "10.0.0.80",
+      "dst_ip": "203.0.113.9"
+    }
+  ],
+  "allow_extra": true,
+  "strict_sids": [
+    1001301,
+    1001302,
+    1001303
+  ]
+}

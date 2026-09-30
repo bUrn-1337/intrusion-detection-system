@@ -1,0 +1,9 @@
+{
+  "description": "BlackNurse: 203.0.113.50 sends 2000 ICMP port unreachables to 192.0.2.10 in 2s, quoting datagrams 192.0.2.10 never sent. The error flood rule fires at the 1000th; since the quoted source is not the receiver, they are not UDP scan answers.",
+  "alerts": [
+    {"sid": 1000023, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"detector": "icmp_flood", "kind": "error_flood", "tracked_addr": "192.0.2.10", "packets": "1000", "top_error": "Destination Unreachable (port unreachable)"}},
+    {"sid": 1000023, "kind": "summary", "src_ip": "203.0.113.50", "count": [1001, 1001]}
+  ],
+  "absent_sids": [1000401]
+}

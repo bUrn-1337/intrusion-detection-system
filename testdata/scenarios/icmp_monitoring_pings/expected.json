@@ -1,0 +1,8 @@
+{
+  "description": "A monitoring server (10.0.0.2) pings 30 hosts once a second each for a minute; all answer. 30 requests a second is far from an echo flood, and every reply is solicited. The server does look like a ping sweep (30 hosts within 30s), so ping_sweep fires: whitelist or pass monitoring hosts.",
+  "alerts": [
+    {"sid": 1000403, "kind": "alert", "src_ip": "10.0.0.2", "count": [1, 1], "details": {"detector": "ping_sweep", "distinct_hosts": "15"}},
+    {"sid": 1000403, "kind": "summary", "src_ip": "10.0.0.2", "count": [1786, 1786]}
+  ],
+  "absent_sids": [1000020, 1000021, 1000022, 1000023, 1000901]
+}

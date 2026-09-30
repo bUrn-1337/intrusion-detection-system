@@ -1,0 +1,37 @@
+{
+  "description": "Four clients send the same ClientHello, three of them with a different GREASE value (0x0a0a, 0x7a7a, 0xfafa) in the cipher, extension and group lists, the way browsers pick a new one per connection. GREASE is left out of JA3, so all four have the listed fingerprint.",
+  "alerts": [
+    {
+      "sid": 1001003,
+      "kind": "alert",
+      "src_ip": "10.0.0.10",
+      "details": {
+        "ja3_hash": "b54538bcff721c2cd9de6254e79a4406"
+      }
+    },
+    {
+      "sid": 1001003,
+      "kind": "alert",
+      "src_ip": "10.0.0.11",
+      "details": {
+        "ja3_hash": "b54538bcff721c2cd9de6254e79a4406"
+      }
+    },
+    {
+      "sid": 1001003,
+      "kind": "alert",
+      "src_ip": "10.0.0.12",
+      "details": {
+        "ja3_hash": "b54538bcff721c2cd9de6254e79a4406"
+      }
+    },
+    {
+      "sid": 1001003,
+      "kind": "alert",
+      "src_ip": "10.0.0.13",
+      "details": {
+        "ja3_hash": "b54538bcff721c2cd9de6254e79a4406"
+      }
+    }
+  ]
+}

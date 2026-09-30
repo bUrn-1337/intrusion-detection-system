@@ -1,0 +1,4 @@
+{
+  "description": "A host without an address yet: MLDv2 reports from :: to ff02::16 with hop limit 1, and a DAD Neighbor Solicitation from ::. :: is outside $HOME_NET, but the low TTL rule (1000409 rev 2) excludes ff02::/16 and 224.0.0.0/24. Nothing fires.",
+  "alerts": []
+}

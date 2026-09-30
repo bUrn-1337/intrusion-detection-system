@@ -1,0 +1,5 @@
+{
+  "description": "Look-alike: 10.0.0.5 loads pages from one server (192.0.2.43:443) 40 times at random 1-60s gaps, one to three connections per page. The same key gets many connection starts, but their intervals are not regular: no beacon alert.",
+  "alerts": [],
+  "absent_sids": [1001101]
+}

@@ -1,0 +1,6 @@
+{
+  "description": "A path traversal hidden with double percent-encoding (%252e%252e%252f), after a normal request and a benign double-encoded ad-click URL from another client, neither of which may alert.",
+  "alerts": [
+    {"sid": 1000202, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "dst_port": 80, "count": [1, 1]}
+  ]
+}

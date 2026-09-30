@@ -1,0 +1,11 @@
+{
+  "description": "203.0.113.50 sends a packet with no TCP flags to ports 1-100 of 192.0.2.10 (nmap -sN); closed ports answer RST/ACK. The NULL packet rule fires on the first packet and summarizes the rest; port_scan fires with scan type null.",
+  "alerts": [
+    {"sid": 1000404, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1]},
+    {"sid": 1000404, "kind": "summary", "src_ip": "203.0.113.50", "count": [100, 100]},
+    {"sid": 1000401, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"detector": "port_scan", "distinct_ports": "20", "scan_types": "null:20", "open_ports": ""}},
+    {"sid": 1000401, "kind": "summary", "src_ip": "203.0.113.50", "count": [81, 81]}
+  ],
+  "absent_sids": [1000001, 1000002, 1000402, 1000405,1000406]
+}

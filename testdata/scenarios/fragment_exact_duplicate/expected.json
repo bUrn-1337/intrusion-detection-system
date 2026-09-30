@@ -1,0 +1,5 @@
+{
+  "description": "Four 3000-byte UDP datagrams fragmented at MTU 1500, every fragment delivered twice, and the first fragment a third time after the last. Exact duplicates are not overlaps; nothing fires.",
+  "alerts": [],
+  "absent_sids": [1000701, 1000702, 1000703, 1000704]
+}

@@ -1,0 +1,7 @@
+{
+  "description": "Three DNS responses whose question name is a compression pointer to itself. One alert, then a summary counting all three.",
+  "alerts": [
+    {"sid": 1000102, "kind": "alert", "src_ip": "192.0.2.53", "dst_ip": "10.0.0.5", "src_port": 53, "count": [1, 1]},
+    {"sid": 1000102, "kind": "summary", "src_ip": "192.0.2.53", "count": [3, 3]}
+  ]
+}

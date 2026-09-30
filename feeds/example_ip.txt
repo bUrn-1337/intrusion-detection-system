@@ -1,0 +1,11 @@
+# Example IP feed (feed ip NAME PATH): one address or CIDR per line, IPv4
+# or IPv6, '#' starts a comment. Documentation addresses only (TEST-NET-3
+# 203.0.113.0/24, TEST-NET-2 198.51.100.0/24, 2001:db8::/32), so this file
+# never matches real traffic. Real data: make feeds (scripts/feeds.sh).
+#
+# Private, loopback, link-local, CGNAT, multicast and unspecified
+# addresses are rejected with a warning: an internal address in a feed is
+# a mistake that would alert on your own network.
+203.0.113.200
+198.51.100.240/29   # a CIDR range
+2001:db8:c2::/48

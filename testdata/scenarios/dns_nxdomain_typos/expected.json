@@ -1,0 +1,4 @@
+{
+  "description": "40 mistyped names (gooogle.com, wikipeda.org, ...) in 20s, all NXDOMAIN. Their labels are words, low in entropy, so the burst does not fire.",
+  "alerts": []
+}

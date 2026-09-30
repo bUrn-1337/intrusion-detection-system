@@ -1,0 +1,8 @@
+{
+  "description": "203.0.113.90 sends an Echo Request in 45 fragments of 1480 bytes. The last starts at offset 65120 and ends at 66600, past the 65535-byte IP limit: the oversize rule fires once. The other fragments are regular.",
+  "alerts": [
+    {"sid": 1000703, "kind": "alert", "src_ip": "203.0.113.90", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"kind": "oversize", "frag_offset": "65120", "end": "66600", "limit": "65535"}}
+  ],
+  "absent_sids": [1000701, 1000702, 1000704]
+}

@@ -1,0 +1,6 @@
+{
+  "description": "A browser opens TLS to www.example.test and to cloudflare-dns.com. The DoH rule fires on the second SNI only.",
+  "alerts": [
+    {"sid": 1000111, "kind": "alert", "src_ip": "10.0.0.5", "dst_ip": "192.0.2.101", "dst_port": 443, "count": [1, 1]}
+  ]
+}

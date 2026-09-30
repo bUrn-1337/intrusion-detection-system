@@ -1,0 +1,10 @@
+{
+  "description": "10.0.0.30 talks to three servers at random moments for 12 minutes, then sends to 200 distinct addresses a minute for 3 minutes. Its per-host fanout baseline fires, naming the host, and so does the global distinct-destinations metric. Its random ports and timing keep the beacon rule quiet.",
+  "alerts": [
+    {"sid": 1001201, "kind": "alert", "src_ip": "10.0.0.30", "count": [1, 1],
+     "details": {"detector": "baseline", "metric": "fanout", "host": "10.0.0.30", "direction": "up", "sustained": "3"}},
+    {"sid": 1001201, "kind": "alert", "count": [1, 1],
+     "details": {"detector": "baseline", "metric": "dsts", "direction": "up", "sustained": "3"}}
+  ],
+  "absent_sids": [1001101]
+}

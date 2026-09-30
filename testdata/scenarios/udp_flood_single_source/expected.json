@@ -1,0 +1,12 @@
+{
+  "description": "203.0.113.50:40000 sends 12000 64-byte UDP datagrams to 192.0.2.10:9999 in 3s and gets nothing back. Both packet udp_flood rules fire at the 10000th datagram with no replies; the byte rule (720 kB) and the reflection rule stay quiet, and one port is no port scan.",
+  "alerts": [
+    {"sid": 1000010, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"detector": "udp_flood", "track": "by_dst", "tracked_addr": "192.0.2.10", "metric": "packets", "packets": "10000", "replies": "0", "top_dst_port": "9999", "distinct_sources": "1"}},
+    {"sid": 1000010, "kind": "summary", "src_ip": "203.0.113.50", "count": [2001, 2001]},
+    {"sid": 1000011, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"detector": "udp_flood", "track": "by_src", "tracked_addr": "203.0.113.50", "packets": "10000", "replies": "0", "top_dst_port": "9999"}},
+    {"sid": 1000011, "kind": "summary", "src_ip": "203.0.113.50", "count": [2001, 2001]}
+  ],
+  "absent_sids": [1000012, 1000013, 1000401]
+}

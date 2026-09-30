@@ -1,0 +1,9 @@
+{
+  "description": "5 Echo Requests from the spoofed victim 192.0.2.50 to 255.255.255.255. The address rule fires, and so does the Ethernet-broadcast rule, since a limited broadcast always goes to ff:ff:ff:ff:ff:ff.",
+  "alerts": [
+    {"sid": 1000006, "kind": "alert", "src_ip": "192.0.2.50", "dst_ip": "255.255.255.255", "count": [1, 1]},
+    {"sid": 1000006, "kind": "summary", "src_ip": "192.0.2.50", "count": [5, 5]},
+    {"sid": 1000005, "kind": "alert", "src_ip": "192.0.2.50", "dst_ip": "255.255.255.255", "count": [1, 1]},
+    {"sid": 1000005, "kind": "summary", "src_ip": "192.0.2.50", "count": [5, 5]}
+  ]
+}

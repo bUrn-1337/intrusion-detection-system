@@ -1,0 +1,6 @@
+{
+  "description": "A profile name of \"><img src=x onerror=alert(1)>, percent-encoded. The event-handler rule matches the decoded URI.",
+  "alerts": [
+    {"sid": 1000216, "kind": "alert", "src_ip": "203.0.113.9", "dst_ip": "192.0.2.80", "dst_port": 80, "count": [1, 1]}
+  ]
+}

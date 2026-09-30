@@ -1,0 +1,7 @@
+{
+  "description": "After one normal lookup, 192.0.2.53 sends 10.0.0.5 12 answers in 3s for names it never asked. unsolicited_response fires at the 10th, then summarizes the rest.",
+  "alerts": [
+    {"sid": 1000103, "kind": "alert", "src_ip": "192.0.2.53", "dst_ip": "10.0.0.5", "count": [1, 1], "details": {"kind": "unsolicited_response", "client": "10.0.0.5", "responses": "10"}},
+    {"sid": 1000103, "kind": "summary", "count": [2, 3]}
+  ]
+}

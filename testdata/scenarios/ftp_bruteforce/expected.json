@@ -1,0 +1,11 @@
+{
+  "description": "An attacker tries 8 passwords over 8s on one FTP connection; every attempt gets 530. The brute-force rule fires at the 5th failure; each PASS also matches the cleartext-password rule. No password may be logged.",
+  "alerts": [
+    {"sid": 1000302, "kind": "alert", "src_ip": "192.0.2.21", "dst_ip": "203.0.113.66", "src_port": 21, "count": [1, 1],
+     "details": {"track": "by_dst", "tracked_addr": "203.0.113.66", "count": "5"}},
+    {"sid": 1000302, "kind": "summary", "dst_ip": "203.0.113.66", "count": [4, 4]},
+    {"sid": 1000301, "kind": "alert", "src_ip": "203.0.113.66", "dst_ip": "192.0.2.21", "dst_port": 21, "count": [1, 1]},
+    {"sid": 1000301, "kind": "summary", "src_ip": "203.0.113.66", "count": [8, 8]}
+  ],
+  "log_must_not_contain": ["guess1pw", "guess5pw", "guess8pw"]
+}

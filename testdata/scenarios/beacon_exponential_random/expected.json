@@ -1,0 +1,5 @@
+{
+  "description": "Look-alike: 10.0.0.5 opens 100 TCP connections to 192.0.2.44:8080 at exponential gaps with a 30s mean (a Poisson process). With this seed one checkpoint passes by chance (fires with persistence:1), but four in a row never do: no beacon alert.",
+  "alerts": [],
+  "absent_sids": [1001101]
+}

@@ -1,0 +1,41 @@
+{
+  "description": "Five hosts each raise one low-severity alert (ping sweep, DoH, DoT, oversized ping, malformed DNS): no incident.",
+  "alerts": [
+    {
+      "sid": 1000403,
+      "kind": "alert",
+      "src_ip": "10.0.0.31"
+    },
+    {
+      "sid": 1000403,
+      "kind": "summary",
+      "src_ip": "10.0.0.31"
+    },
+    {
+      "sid": 1000111,
+      "kind": "alert",
+      "src_ip": "10.0.0.32"
+    },
+    {
+      "sid": 1000112,
+      "kind": "alert",
+      "src_ip": "10.0.0.33"
+    },
+    {
+      "sid": 1000902,
+      "kind": "alert",
+      "src_ip": "10.0.0.34"
+    },
+    {
+      "sid": 1000102,
+      "kind": "alert",
+      "src_ip": "10.0.0.35"
+    }
+  ],
+  "allow_extra": false,
+  "strict_sids": [
+    1001301,
+    1001302,
+    1001303
+  ]
+}

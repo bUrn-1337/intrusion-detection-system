@@ -1,0 +1,12 @@
+{
+  "description": "12000 datagrams from 203.0.113.50:40000 to the closed port 192.0.2.10:7777 in 3s; the target answers 120 rate-limited ICMP port unreachables. ICMP errors are not replies, so both packet udp_flood rules fire with 0 replies. One closed port is no port scan, and 120 errors are no error flood.",
+  "alerts": [
+    {"sid": 1000010, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"detector": "udp_flood", "track": "by_dst", "tracked_addr": "192.0.2.10", "packets": "10000", "replies": "0", "top_dst_port": "7777"}},
+    {"sid": 1000010, "kind": "summary", "src_ip": "203.0.113.50", "count": [2001, 2001]},
+    {"sid": 1000011, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1],
+     "details": {"detector": "udp_flood", "track": "by_src", "tracked_addr": "203.0.113.50", "packets": "10000", "replies": "0"}},
+    {"sid": 1000011, "kind": "summary", "src_ip": "203.0.113.50", "count": [2001, 2001]}
+  ],
+  "absent_sids": [1000023, 1000401]
+}

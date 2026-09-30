@@ -1,0 +1,9 @@
+{
+  "description": "iperf -u -l 60000 on lo: 1800 unfragmented 60000-byte datagrams from 127.0.0.1:40000 to 127.0.0.1:9000 in 3.6s, captured with a 128-byte snaplen. The byte rule fires at 100 MB (the 1667th datagram), counted from the UDP Length field; 1800 packets stay below the packet rules. The host sends to itself, and its own datagrams do not count as replies.",
+  "alerts": [
+    {"sid": 1000012, "kind": "alert", "src_ip": "127.0.0.1", "dst_ip": "127.0.0.1", "count": [1, 1],
+     "details": {"detector": "udp_flood", "track": "by_dst", "metric": "bytes", "tracked_addr": "127.0.0.1", "packets": "1667", "bytes": "100033336", "replies": "0"}},
+    {"sid": 1000012, "kind": "summary", "src_ip": "127.0.0.1", "count": [134, 134]}
+  ],
+  "absent_sids": [1000010, 1000011]
+}

@@ -1,0 +1,9 @@
+{
+  "description": "ping -s 4000 127.0.0.1 on lo and ping -s 8000 on a jumbo-frame LAN, three each: standard payloads in single frames. Only the low oversized Echo Request rule fires. ping -s 1472 fills a 1500-byte frame exactly and does not. (A fragmented large ping is not reassembled, and its first fragment carries at most 1472 bytes; see legit_large_ping.)",
+  "alerts": [
+    {"sid": 1000902, "kind": "alert", "src_ip": "127.0.0.1", "dst_ip": "127.0.0.1", "count": [1, 1]},
+    {"sid": 1000902, "kind": "summary", "src_ip": "127.0.0.1", "count": [3, 3]},
+    {"sid": 1000902, "kind": "alert", "src_ip": "10.0.0.5", "dst_ip": "10.0.0.9", "count": [1, 1]},
+    {"sid": 1000902, "kind": "summary", "src_ip": "10.0.0.5", "count": [3, 3]}
+  ]
+}

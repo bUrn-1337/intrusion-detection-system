@@ -1,0 +1,35 @@
+{
+  "description": "The scenario's feed.txt lists 10.9.9.9, 192.168.1.0/24, 127.0.0.1, 100.64.0.1, 169.254.1.1, 224.0.0.251, 0.0.0.0 and a non-address among one valid entry. Each bad line is rejected with file:line in a load warning event and loading goes on; traffic to 10.9.9.9 and 192.168.1.20 fires nothing, traffic to 203.0.113.201 does.",
+  "extra_rules": [
+    "feed ip mistakes {scenario}/feed.txt",
+    "alert ip any any -> any any (msg:\"Traffic with a test-feed address\"; ip_feed:mistakes; sid:1001090; rev:1; severity:high; category:threat-intel;)"
+  ],
+  "alerts": [
+    {
+      "sid": 1001090,
+      "kind": "alert",
+      "src_ip": "10.0.0.5",
+      "dst_ip": "203.0.113.201",
+      "details": {
+        "side": "dst",
+        "indicator": "203.0.113.201"
+      }
+    },
+    {
+      "sid": 1001090,
+      "kind": "summary",
+      "dst_ip": "203.0.113.201"
+    }
+  ],
+  "log_must_contain": [
+    "\"event\":\"warning\"",
+    "feed.txt:3: 10.9.9.9 is private (RFC 1918, 10.0.0.0/8)",
+    "feed.txt:4: 192.168.1.0/24 is private",
+    "feed.txt:5: 127.0.0.1 is loopback",
+    "feed.txt:6: 100.64.0.1 is",
+    "feed.txt:7: 169.254.1.1 is link-local",
+    "feed.txt:8: 224.0.0.251 is multicast",
+    "feed.txt:9: 0.0.0.0 is",
+    "feed.txt:10: "
+  ]
+}

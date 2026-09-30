@@ -1,0 +1,9 @@
+{
+  "description": "300 SYNs to 192.0.2.10:80 from 300 spoofed sources; the SYN/ACKs are never answered. Only the by_dst rule can see this; no single source reaches the by_src threshold. Five real clients complete their handshakes.",
+  "alerts": [
+    {"sid": 1000001, "kind": "alert", "dst_ip": "192.0.2.10", "dst_port": 80, "count": [1, 1],
+     "details": {"track": "by_dst", "tracked_addr": "192.0.2.10", "top_dst_port": "80"}},
+    {"sid": 1000001, "kind": "summary", "dst_ip": "192.0.2.10", "count": [150, 300]}
+  ],
+  "absent_sids": [1000002]
+}

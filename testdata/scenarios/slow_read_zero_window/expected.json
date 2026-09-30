@@ -1,0 +1,7 @@
+{
+  "description": "12 clients request a large file and then advertise a zero window for 30 s, answering each server window probe with another zero window. After 20 s, 10 flows qualify and the slow-read rule alerts; the summary counts all 12.",
+  "alerts": [
+    {"sid": 1000033, "kind": "alert", "src_ip": "203.0.113.52", "count": [1, 1], "details": {"kind": "slow_read", "flows": "10"}},
+    {"sid": 1000033, "kind": "summary", "src_ip": "203.0.113.52", "count": [3, 3]}
+  ]
+}

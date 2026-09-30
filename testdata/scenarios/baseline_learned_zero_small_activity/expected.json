@@ -1,0 +1,8 @@
+{
+  "description": "The arpspoof-style case: a metric learned at 0 then a little activity. After 12 minutes with no DNS, 10.0.0.20 sends 0.9 answered DNS queries/s for 5 minutes. Against a mean of 0 and the 0.2/s DNS floor that scores 4.5 deviations for 5 intervals, but it stays below the DNS min_level (1/s), so the baseline rule does not fire (it does with min_level:dns=0).",
+  "extra_rules": ["alert ip $HOME_NET any <> any any (msg:\"floor test\"; detect:baseline; min_level:dns=0; sid:9999998; rev:1; severity:low; category:anomaly;)"],
+  "alerts": [
+    {"sid": 9999998, "kind": "alert", "count": [1, 1], "details": {"detector": "baseline", "metric": "dns", "direction": "up", "min_level": "0"}}
+  ],
+  "absent_sids": [1001201]
+}

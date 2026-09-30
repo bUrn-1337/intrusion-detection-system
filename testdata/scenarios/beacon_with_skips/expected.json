@@ -1,0 +1,7 @@
+{
+  "description": "10.0.0.7 sends an answered UDP check-in to 203.0.113.78:5555 on a 60s schedule but skips every fourth beat. The 2m gaps fall in the 2x band, so all intervals count as regular and the rule fires at the 10th check-in. The replies keep each flow alive but are not events.",
+  "alerts": [
+    {"sid": 1001101, "kind": "alert", "src_ip": "10.0.0.7", "dst_ip": "203.0.113.78", "dst_port": 5555, "count": [1, 1],
+     "details": {"detector": "beacon", "median": "1m0.1s", "fraction": "1.00", "count": "32"}}
+  ]
+}

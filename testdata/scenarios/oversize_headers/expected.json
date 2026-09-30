@@ -1,0 +1,7 @@
+{
+  "description": "One request carries a 20 KB Cookie header in 1400-byte segments and passes the 16 KiB head cap; another client's 8 KB of headers is within it and does not alert.",
+  "alerts": [
+    {"sid": 1000502, "kind": "alert", "src_ip": "10.0.0.60", "dst_ip": "192.0.2.80", "dst_port": 80, "count": [1, 1]}
+  ],
+  "stream_stats": {"oversize_headers": [1, 1], "overlap_conflicts": [0, 0]}
+}

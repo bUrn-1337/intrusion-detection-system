@@ -1,0 +1,6 @@
+{
+  "description": "12 concurrent 1 MB uploads over a slow link at 500 B/s each, for 40 s. Their headers are complete and the body rate is above the 100 B/s floor, so nothing alerts.",
+  "alerts": [],
+  "absent_sids": [1000030, 1000031, 1000032, 1000033],
+  "stream_stats": {"overlap_conflicts": [0, 0], "desyncs": [0, 0], "flows": [0, 0], "messages": [12, 12]}
+}

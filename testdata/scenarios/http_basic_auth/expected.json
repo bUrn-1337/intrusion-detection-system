@@ -1,0 +1,7 @@
+{
+  "description": "A client sends Basic auth credentials (admin:hunter2) over plain HTTP. The credentials must not appear in the log or on stdout.",
+  "alerts": [
+    {"sid": 1000201, "kind": "alert", "src_ip": "10.0.0.7", "dst_ip": "192.0.2.80", "dst_port": 80, "count": [1, 1]}
+  ],
+  "log_must_not_contain": ["YWRtaW46aHVudGVyMg==", "hunter2"]
+}
