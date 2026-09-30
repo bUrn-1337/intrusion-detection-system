@@ -222,6 +222,7 @@ func parseIPv6(p *packet.ParsedPacket) {
 	// Ethernet padding.
 	end := p.IPEnd()
 	off := l3 + ipv6HeaderLen
+	sawFragment := false
 	for n := 0; ; n++ {
 		p.IPProto = nextHeader
 
@@ -268,6 +269,14 @@ func parseIPv6(p *packet.ParsedPacket) {
 		}
 
 		if nextHeader == nhFragment {
+			if sawFragment {
+				// RFC 8200 allows only one fragment header; a second one
+				// is malformed and a known evasion trick. Keep the first
+				// header's (consistent) fragment state and stop.
+				p.AddError("ipv6: multiple fragment headers")
+				return
+			}
+			sawFragment = true
 			fragField := binary.BigEndian.Uint16(raw[off+2:])
 			p.FragOffset = fragField &^ 0x7 // 13-bit offset in 8-byte units, already x8
 			p.MoreFragments = fragField&0x1 != 0
