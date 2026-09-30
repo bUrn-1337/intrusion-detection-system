@@ -1,0 +1,21 @@
+{
+  "description": "10.0.0.80 contacts the feed-listed c2.example.net, then 3 hours later SYN-scans it: c2 before recon, so no multi_stage.",
+  "alerts": [
+    {
+      "sid": 1001002,
+      "kind": "alert",
+      "src_ip": "10.0.0.80"
+    },
+    {
+      "sid": 1000401,
+      "kind": "alert",
+      "src_ip": "10.0.0.80"
+    }
+  ],
+  "allow_extra": true,
+  "strict_sids": [
+    1001301,
+    1001302,
+    1001303
+  ]
+}

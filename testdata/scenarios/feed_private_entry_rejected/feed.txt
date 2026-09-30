@@ -1,0 +1,11 @@
+# A feed with mistakes: internal and reserved addresses, which must be
+# rejected with a warning, and one good entry.
+10.9.9.9
+192.168.1.0/24
+127.0.0.1
+100.64.0.1
+169.254.1.1
+224.0.0.251
+0.0.0.0
+not-an-ip
+203.0.113.201

@@ -160,6 +160,7 @@ func TestDescribeApp(t *testing.T) {
 		{"ftp reply", packet.AppFTP, map[string]string{"response_code": "230"}, "FTP 230"},
 		{"tls sni", packet.AppTLS, map[string]string{"sni": "example.com", "sni_status": "found"}, "TLS SNI example.com"},
 		{"tls truncated", packet.AppTLS, map[string]string{"sni_status": "truncated"}, "TLS SNI truncated"},
+		{"tls ja3", packet.AppTLS, map[string]string{"sni": "example.com", "sni_status": "found", "ja3": "771,,,,", "ja3_hash": "0123456789abcdef0123456789abcdef"}, "TLS SNI example.com JA3 0123456789abcdef0123456789abcdef"},
 		{"tls absent", packet.AppTLS, map[string]string{"sni_status": "absent"}, "TLS ClientHello without SNI"},
 		{"tls other record", packet.AppTLS, nil, "TLS"},
 	}

@@ -85,9 +85,12 @@ func parseTLS(b []byte, hinted bool) *result {
 	return r
 }
 
-// walkClientHello finds the server_name extension in a ClientHello body.
-// If the body is truncated, running out of bytes means "truncated", not
-// malformed.
+// walkClientHello reads the server name and the JA3 fingerprint of a
+// ClientHello body. If the body is truncated, running out of bytes means
+// "truncated", not malformed, and no JA3 is computed: a fingerprint of
+// part of the extensions would be wrong. An extension that runs past the
+// end after the server name was found is not reported, as before JA3
+// walked the extensions after it.
 func walkClientHello(r *result, body []byte, truncated bool) {
 	c := cursor{b: body}
 	overrun := func() {
@@ -98,7 +101,8 @@ func walkClientHello(r *result, body []byte, truncated bool) {
 		}
 	}
 
-	c.skip(2 + tlsRandomLen) // legacy_version, random
+	version, _ := c.u16() // legacy_version
+	c.skip(tlsRandomLen)
 	sidLen, ok := c.u8()
 	if ok && sidLen > tlsMaxSessionIDLen {
 		r.bad(reasonBadSessionID)
@@ -106,15 +110,20 @@ func walkClientHello(r *result, body []byte, truncated bool) {
 	}
 	c.skip(int(sidLen))
 	n16, _ := c.u16()
-	c.skip(int(n16)) // cipher_suites
+	ciphers, _ := c.take(int(n16))
 	n8, _ := c.u8()
 	c.skip(int(n8)) // compression_methods
 	if c.failed {
 		overrun()
 		return
 	}
+	var fp ja3
+	fp.init(version, ciphers)
 	if c.done() {
 		r.set("sni_status", sniAbsent) // no extensions at all
+		if !truncated {
+			fp.commit(r)
+		}
 		return
 	}
 	extLen, _ := c.u16()
@@ -129,34 +138,45 @@ func walkClientHello(r *result, body []byte, truncated bool) {
 	}
 
 	e := cursor{b: exts}
+	sni := false
 	for !e.done() {
 		typ, _ := e.u16()
 		n, _ := e.u16()
 		data, ok := e.take(int(n))
 		if !ok {
-			overrun()
+			if !sni {
+				overrun()
+			}
 			return
 		}
-		if typ == tlsExtServerName {
-			parseServerName(r, data)
-			return
+		fp.extension(typ, data)
+		if typ == tlsExtServerName && !sni {
+			sni = true
+			if !parseServerName(r, data) {
+				return
+			}
 		}
 	}
-	if truncated {
+	switch {
+	case truncated && !sni:
 		r.set("sni_status", sniTruncated)
-	} else {
+	case !sni:
 		r.set("sni_status", sniAbsent)
+	}
+	if !truncated {
+		fp.commit(r)
 	}
 }
 
 // parseServerName reads the host_name entry of a server_name extension.
-func parseServerName(r *result, data []byte) {
+// It reports false if the extension is malformed.
+func parseServerName(r *result, data []byte) bool {
 	c := cursor{b: data}
 	listLen, _ := c.u16()
 	list, ok := c.take(int(listLen))
 	if !ok || !c.done() {
 		r.bad(reasonBadServerName)
-		return
+		return false
 	}
 	l := cursor{b: list}
 	for !l.done() {
@@ -165,15 +185,16 @@ func parseServerName(r *result, data []byte) {
 		name, ok := l.take(int(n))
 		if !ok || len(name) == 0 {
 			r.bad(reasonBadServerName)
-			return
+			return false
 		}
 		if typ == tlsServerNameHost {
 			r.set("sni", strings.ToLower(string(name)))
 			r.set("sni_status", sniFound)
-			return
+			return true
 		}
 	}
 	r.set("sni_status", sniAbsent)
+	return true
 }
 
 // cursor reads big-endian values from b. Once a read runs past the end,

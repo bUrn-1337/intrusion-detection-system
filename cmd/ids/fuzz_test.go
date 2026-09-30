@@ -71,7 +71,7 @@ func FuzzPipeline(f *testing.F) {
 		now := pcapgen.T0
 		check := func(as []rules.Alert) {
 			for _, a := range as {
-				if !sids[a.SID] || a.Count < 1 || (a.Kind != rules.KindAlert && a.Kind != rules.KindSummary) {
+				if !sids[a.SID] || a.Count < 1 || !wellFormedKind(&a) {
 					t.Fatalf("bad alert %+v", a)
 				}
 			}
@@ -141,7 +141,7 @@ func FuzzStream(f *testing.F) {
 		now := pcapgen.T0
 		check := func(as []rules.Alert) {
 			for _, a := range as {
-				if !sids[a.SID] || a.Count < 1 || (a.Kind != rules.KindAlert && a.Kind != rules.KindSummary) {
+				if !sids[a.SID] || a.Count < 1 || !wellFormedKind(&a) {
 					t.Fatalf("bad alert %+v", a)
 				}
 			}
@@ -197,4 +197,16 @@ func readFrames(tb testing.TB, path string) [][]byte {
 		}
 		out = append(out, b)
 	}
+}
+
+// wellFormedKind reports whether a has a known kind and, if it is an
+// incident, the details every incident carries.
+func wellFormedKind(a *rules.Alert) bool {
+	switch a.Kind {
+	case rules.KindAlert, rules.KindSummary:
+		return a.Details["attribution"] == "reliable" || a.Details["attribution"] == "spoofable"
+	case rules.KindIncident, rules.KindIncidentUpdate:
+		return a.Details["incident_id"] != "" && a.Details["chain"] != "" && a.Details["attribution"] == "reliable"
+	}
+	return false
 }

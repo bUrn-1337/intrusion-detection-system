@@ -1,0 +1,21 @@
+{
+  "description": "A SYN scan, then a Log4Shell request 30 hours later from the same attacker: past the 24h recon window (and the 24h history), no multi_stage.",
+  "alerts": [
+    {
+      "sid": 1000401,
+      "kind": "alert",
+      "src_ip": "203.0.113.9"
+    },
+    {
+      "sid": 1000221,
+      "kind": "alert",
+      "src_ip": "203.0.113.9"
+    }
+  ],
+  "allow_extra": true,
+  "strict_sids": [
+    1001301,
+    1001302,
+    1001303
+  ]
+}

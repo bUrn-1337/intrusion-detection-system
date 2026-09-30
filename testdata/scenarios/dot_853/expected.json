@@ -1,5 +1,5 @@
 {
-  "description": "A client opens DNS over TLS on port 853. The DoT rule fires on the SYN.",
+  "description": "A client opens DNS over TLS on port 853. The DoT rule fires once, on the ClientHello (its first packet with payload).",
   "alerts": [
     {"sid": 1000112, "kind": "alert", "src_ip": "10.0.0.5", "dst_ip": "192.0.2.111", "dst_port": 853, "count": [1, 1]}
   ]

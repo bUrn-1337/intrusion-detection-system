@@ -1,0 +1,82 @@
+{
+  "description": "203.0.113.9 SYN-scans 10.0.0.80, then sends it Log4Shell; 10.0.0.80 then polls the feed-listed c2.example.net every 60s and runs a DNS tunnel. multi_stage for the attacker (created high at the exploit, updated to critical recon -> exploit -> c2 when the victim reaches the C2) and compromised_host for the victim. The DNS tunnel is over UDP, so spoofable: it adds no exfil stage. No update for the later beacon alert (c2 again).",
+  "alerts": [
+    {
+      "sid": 1000401,
+      "kind": "alert",
+      "src_ip": "203.0.113.9",
+      "dst_ip": "10.0.0.80",
+      "details": {
+        "attribution": "spoofable"
+      }
+    },
+    {
+      "sid": 1000221,
+      "kind": "alert",
+      "src_ip": "203.0.113.9",
+      "dst_ip": "10.0.0.80",
+      "details": {
+        "attribution": "reliable"
+      }
+    },
+    {
+      "sid": 1001301,
+      "kind": "incident",
+      "src_ip": "203.0.113.9",
+      "dst_ip": "10.0.0.80",
+      "details": {
+        "kind": "multi_stage",
+        "chain": "recon -> exploit",
+        "attacker": "203.0.113.9",
+        "victim": "10.0.0.80",
+        "incident_id": "inc-807f271848bb852b"
+      }
+    },
+    {
+      "sid": 1001301,
+      "kind": "incident_update",
+      "src_ip": "203.0.113.9",
+      "dst_ip": "10.0.0.80",
+      "details": {
+        "chain": "recon -> exploit -> c2",
+        "incident_id": "inc-807f271848bb852b"
+      }
+    },
+    {
+      "sid": 1001302,
+      "kind": "incident",
+      "src_ip": "10.0.0.80",
+      "dst_ip": "203.0.113.9",
+      "details": {
+        "kind": "compromised_host",
+        "chain": "exploit -> c2",
+        "host": "10.0.0.80",
+        "exploited_by": "203.0.113.9",
+        "exploited_by_attribution": "reliable"
+      }
+    },
+    {
+      "sid": 1001101,
+      "kind": "alert",
+      "src_ip": "10.0.0.80",
+      "dst_ip": "198.51.100.66",
+      "details": {
+        "attribution": "reliable"
+      }
+    },
+    {
+      "sid": 1000108,
+      "kind": "alert",
+      "src_ip": "10.0.0.80",
+      "details": {
+        "attribution": "spoofable"
+      }
+    }
+  ],
+  "allow_extra": true,
+  "strict_sids": [
+    1001301,
+    1001302,
+    1001303
+  ]
+}

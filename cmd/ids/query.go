@@ -42,7 +42,7 @@ func runQuery(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	})
 	fs.IntVar(&f.SID, "sid", 0, "rule SID")
 	fs.StringVar(&f.Category, "category", "", "rule category (case-insensitive)")
-	fs.StringVar(&f.Kind, "kind", "", "alert kind: alert or summary")
+	fs.StringVar(&f.Kind, "kind", "", "alert kind: alert, summary, incident or incident_update")
 	fs.StringVar(&f.Type, "type", logging.TypeAlert, "record type: alert, stats, event or all")
 	fs.BoolVar(&follow, "follow", false, "keep printing new matching records, like tail -f (Ctrl-C stops)")
 	fs.BoolVar(&asJSON, "json", false, "print raw JSON Lines instead of a table")

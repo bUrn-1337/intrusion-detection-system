@@ -1,0 +1,7 @@
+{
+  "description": "10.0.0.5 opens a TCP connection to 198.51.100.77:8443 every 60s +-20% (uniform), 20 times. Every interval is within 25% of the median (57.4s), so the beacon rule fires at the 10th connection.",
+  "alerts": [
+    {"sid": 1001101, "kind": "alert", "src_ip": "10.0.0.5", "dst_ip": "198.51.100.77", "dst_port": 8443, "count": [1, 1],
+     "details": {"detector": "beacon", "median": "57.8s", "fraction": "1.00", "count": "32"}}
+  ]
+}

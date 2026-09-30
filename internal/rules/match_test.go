@@ -175,6 +175,7 @@ func TestAlertFields(t *testing.T) {
 		Time: at(time.Second), FirstSeen: at(time.Second), LastSeen: at(time.Second),
 		SID: 42, Rev: 3, Msg: "web", Severity: "high", Category: "web", Proto: "TCP",
 		SrcIP: "10.0.0.1", DstIP: "10.0.0.2", SrcPort: 40000, DstPort: 80, Count: 1, Kind: KindAlert,
+		Details: map[string]string{"attribution": "spoofable"}, // a SYN only
 	}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v\nwant %+v", got, want)

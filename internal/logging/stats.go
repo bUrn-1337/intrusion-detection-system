@@ -66,8 +66,14 @@ type Snapshot struct {
 	TrackedIPs                      int      // distinct sources in the windows
 	Untracked                       uint64   // packets from sources over the cap
 
-	Alerts       uint64        // alert records seen (alerts and summaries)
+	Alerts       uint64        // alert records seen (alerts, summaries and incidents)
 	RecentAlerts []rules.Alert // oldest first
+
+	// Incidents are the active incidents, most severe first (see
+	// SortIncidents). AlertClock is the newest alert time, the clock
+	// incidents age by in a pcap replay.
+	Incidents  []Incident
+	AlertClock time.Time
 }
 
 // Totals returns the traffic counters for a stats record.
@@ -123,6 +129,9 @@ type Aggregator struct {
 	ringNext int
 	ringFull bool
 
+	incidents  map[string]*Incident // by incident id
+	alertClock time.Time
+
 	mu   sync.Mutex
 	snap Snapshot
 }
@@ -138,8 +147,9 @@ func NewAggregator(cfg AggregatorConfig, now time.Time) *Aggregator {
 	a := &Aggregator{
 		cfg: cfg, started: now, lastTick: now, winStart: now,
 		byL4: make(map[string]uint64), byApp: make(map[string]uint64),
-		win:  [2]*talkerWindow{newTalkerWindow(), newTalkerWindow()},
-		ring: make([]rules.Alert, cfg.RecentAlerts),
+		win:       [2]*talkerWindow{newTalkerWindow(), newTalkerWindow()},
+		ring:      make([]rules.Alert, cfg.RecentAlerts),
+		incidents: make(map[string]*Incident),
 	}
 	a.snap = Snapshot{Time: now, Started: now}
 	return a
@@ -198,15 +208,23 @@ func (a *Aggregator) talker(ip netip.Addr) *talkerStats {
 	return t
 }
 
-// Alert records one alert or summary: it goes into the recent alerts ring
-// and counts against its source (a summary adds the matches its first
-// alert did not already count).
+// Alert records one alert, summary or incident: it goes into the recent
+// alerts ring and counts against its source (a summary adds the matches
+// its first alert did not already count). Incidents are tracked by id
+// instead of counting against a source.
 func (a *Aggregator) Alert(al rules.Alert) {
 	a.alerts++
 	a.ring[a.ringNext] = al
 	a.ringNext = (a.ringNext + 1) % len(a.ring)
 	if a.ringNext == 0 {
 		a.ringFull = true
+	}
+	if IsIncident(&al) {
+		a.incident(&al)
+		return
+	}
+	if al.Time.After(a.alertClock) {
+		a.alertClock = al.Time
 	}
 
 	n := uint64(1)
@@ -266,6 +284,7 @@ func (a *Aggregator) Tick(now time.Time) {
 		Packets: a.packets, Bytes: a.bytes, PPS: pps, BPS: bps,
 		ByL4: sortedCounts(a.byL4), ByApp: sortedCounts(a.byApp),
 		Alerts: a.alerts, RecentAlerts: a.recent(),
+		Incidents: a.activeIncidents(), AlertClock: a.alertClock,
 	}
 	if hs > 0 {
 		s.AvgPPS, s.AvgBPS = float64(hp)/hs, float64(hb)/hs

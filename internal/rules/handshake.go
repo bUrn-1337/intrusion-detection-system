@@ -42,6 +42,9 @@ type handshakeTracker struct {
 	m       map[hsKey]*list.Element // Value is *hsEntry
 	order   list.List               // creation order, oldest first
 	stat    *tableStat
+	// started is true when the last observe call opened a new
+	// handshake (a SYN that is not a retransmission).
+	started bool
 }
 
 type hsKey struct {
@@ -111,6 +114,7 @@ func (h *handshakeTracker) observe(s *tcpSegment, now time.Time, out []hsEvent) 
 	fromClient := hsKey{client: s.src, cport: s.sport, server: s.dst, sport: s.dport}
 	fromServer := hsKey{client: s.dst, cport: s.dport, server: s.src, sport: s.sport}
 	syn, ack, rst := s.flags&tcpSYN != 0, s.flags&tcpACK != 0, s.flags&tcpRST != 0
+	h.started = false
 
 	switch {
 	case rst:
@@ -137,6 +141,7 @@ func (h *handshakeTracker) observe(s *tcpSegment, now time.Time, out []hsEvent) 
 		}
 		h.m[fromClient] = h.order.PushBack(&hsEntry{key: fromClient, synAt: now, seq: s.seq, synFin: s.flags&tcpFIN != 0})
 		h.stat.keys.Add(1)
+		h.started = true
 	case syn && ack:
 		if el, ok := h.m[fromServer]; ok {
 			e := el.Value.(*hsEntry)

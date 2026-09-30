@@ -1,0 +1,30 @@
+{
+  "description": "10.0.0.5 connects to 203.0.113.200, listed in feeds/example_ip.txt, on 443 and again 2s later on 8080; 10.0.0.6 talks to an unlisted server. One alert names the destination side; the second connection has the same (indicator, peer) and is folded into the summary.",
+  "alerts": [
+    {
+      "sid": 1001001,
+      "kind": "alert",
+      "src_ip": "10.0.0.5",
+      "dst_ip": "203.0.113.200",
+      "dst_port": 443,
+      "details": {
+        "ip_feed": "example_ip",
+        "side": "dst",
+        "indicator": "203.0.113.200"
+      }
+    },
+    {
+      "sid": 1001001,
+      "kind": "summary",
+      "src_ip": "10.0.0.5",
+      "dst_ip": "203.0.113.200",
+      "count": [
+        10,
+        20
+      ],
+      "details": {
+        "side": "dst"
+      }
+    }
+  ]
+}

@@ -276,6 +276,7 @@ func runPipeline(ctx context.Context, opt runOptions, stdout, stderr io.Writer) 
 	} else {
 		fmt.Fprintf(stderr, "ids: %d rules from %s, reading %s, logging to %s\n", rs.Len(), opt.rules, d.source, opt.log.Path)
 	}
+	d.feedEvents(d.start)
 
 	// Capture runs until ctx is cancelled (signal, q) or the file ends.
 	capCtx, cancel := context.WithCancel(ctx)
@@ -338,6 +339,9 @@ func (d *ids) pipeline(pkts <-chan *packet.ParsedPacket) {
 			app.Parse(p)
 			d.agg.Packet(p)
 			d.emit(d.eng.Process(p))
+			if ns := d.eng.TakeNotices(); ns != nil {
+				d.notices(ns)
+			}
 		case now := <-tick.C:
 			d.agg.Tick(now)
 		case now := <-statsTick.C:
@@ -372,10 +376,13 @@ func (d *ids) emit(alerts []rules.Alert) {
 
 func (d *ids) statsRecord(now time.Time, reason string) logging.StatsRecord {
 	cs := d.cap.Stats()
+	s := d.eng.Stats()
+	es := logging.EngineStatsFrom(s)
+	es.Feeds = logging.FeedStatsFrom(s.Feeds, now)
 	return logging.StatsRecord{
 		Time: now, Reason: reason, Uptime: now.Sub(d.start).Seconds(), Source: d.source,
 		Capture: logging.CaptureStats{Captured: cs.Captured, KernelDropped: cs.KernelDropped, QueueDropped: cs.QueueDropped, QueueDepth: cs.QueueDepth},
-		Engine:  logging.EngineStatsFrom(d.eng.Stats()),
+		Engine:  es,
 		Stream:  logging.StreamStatsFrom(d.stream.Stats()),
 		Traffic: d.agg.Totals(),
 		Log:     d.log.Stats(),
@@ -387,16 +394,30 @@ func (d *ids) printFinal() {
 	es := d.eng.Stats()
 	ls := d.log.Stats()
 	ss := d.stream.Stats()
-	fmt.Fprintf(d.stderr, "ids: captured=%d kernel_dropped=%d queue_dropped=%d rules=%d packets=%d alerts=%d summaries=%d log_written=%d log_dropped=%d\n",
-		cs.Captured, cs.KernelDropped, cs.QueueDropped, es.Rules, es.Packets, es.Alerts, es.Summaries, ls.Written, ls.Dropped)
+	fmt.Fprintf(d.stderr, "ids: captured=%d kernel_dropped=%d queue_dropped=%d rules=%d packets=%d alerts=%d summaries=%d incidents=%d log_written=%d log_dropped=%d\n",
+		cs.Captured, cs.KernelDropped, cs.QueueDropped, es.Rules, es.Packets, es.Alerts, es.Summaries, es.Incidents, ls.Written, ls.Dropped)
 	fmt.Fprintf(d.stderr, "ids: stream flows=%d messages=%d evictions=%d gaps=%d desyncs=%d resyncs=%d overlap_conflicts=%d oversize_headers=%d ooo_overflows=%d cap_drops=%d buffered_peak=%d\n",
 		ss.FlowsTotal, ss.Messages, ss.Evictions, ss.Gaps, ss.Desyncs, ss.Resyncs, ss.OverlapConflicts, ss.OversizeHeaders, ss.OOOOverflows, ss.CapDrops, ss.BufferedPeak)
 }
 
+// notices logs the engine's notices (a baseline learning or active) as
+// events.
+func (d *ids) notices(ns []rules.Notice) {
+	n := d.eng.Stats().Rules
+	for _, x := range ns {
+		d.log.WriteEvent(logging.EventRecord{Time: time.Now(), Event: logging.EventBaseline, OK: true, Rules: n, Path: d.opt.rules, Message: x.Message})
+		if d.dash == nil {
+			fmt.Fprintln(d.stderr, "ids:", x.Message)
+		}
+	}
+}
+
 func (d *ids) getHeader() tui.Header {
 	d.hmu.Lock()
-	defer d.hmu.Unlock()
-	return d.header
+	h := d.header
+	d.hmu.Unlock()
+	h.Baseline = d.eng.BaselineStatus()
+	return h
 }
 
 func (d *ids) health() tui.Health {
@@ -458,4 +479,33 @@ func (d *ids) reload() {
 			fmt.Fprintf(d.stderr, "ids: reloaded %d rules from %s\n", n, d.opt.rules)
 		}
 	}
+	if err == nil {
+		d.feedEvents(now)
+	}
+}
+
+// feedEvents logs a warning event for every feed load warning and every
+// stale feed of the rules just loaded, and shows the feeds in the header.
+// Staleness is judged against wall time: a feed is as old as its file,
+// whatever time the packets carry.
+func (d *ids) feedEvents(now time.Time) {
+	msgs := d.eng.Warnings()
+	feeds := d.eng.Stats().Feeds
+	status := make([]tui.FeedStatus, len(feeds))
+	for i, f := range feeds {
+		status[i] = tui.FeedStatus{Name: f.Name, Entries: f.Entries, ModTime: f.ModTime, MaxAge: f.MaxAge}
+		if age := now.Sub(f.ModTime); f.MaxAge > 0 && age > f.MaxAge {
+			msgs = append(msgs, fmt.Sprintf("feed %s is stale: %s was last modified %s ago (max_age %s); run make feeds to refresh it",
+				f.Name, f.Path, age.Truncate(time.Minute), f.MaxAge))
+		}
+	}
+	for _, m := range msgs {
+		d.log.WriteEvent(logging.EventRecord{Time: now, Event: logging.EventWarning, OK: true, Rules: d.eng.Stats().Rules, Path: d.opt.rules, Message: m})
+		if d.dash == nil {
+			fmt.Fprintln(d.stderr, "ids: warning:", m)
+		}
+	}
+	d.hmu.Lock()
+	d.header.Feeds = status
+	d.hmu.Unlock()
 }

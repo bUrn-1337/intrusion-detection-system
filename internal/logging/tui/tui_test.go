@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -309,5 +310,181 @@ func TestStopFromOtherGoroutine(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop did not end Run")
+	}
+}
+
+// The header lists each feed with its size and age; a stale feed is red.
+func TestRenderFeeds(t *testing.T) {
+	m := fixedModel()
+	m.Header.Feeds = []FeedStatus{
+		{Name: "feodo", Entries: 412, ModTime: m.Now.Add(-3 * time.Hour), MaxAge: 7 * 24 * time.Hour},
+		{Name: "urlhaus", Entries: 21000, ModTime: m.Now.Add(-9 * 24 * time.Hour), MaxAge: 7 * 24 * time.Hour},
+		{Name: "pinned", Entries: 3, ModTime: m.Now.Add(-400 * 24 * time.Hour)},
+	}
+	s := newScreen(t)
+	defer s.Fini()
+	Draw(s, m)
+	lines := screenText(s)
+	row := -1
+	for i, l := range lines {
+		if strings.Contains(l, "Feeds:") {
+			row = i
+		}
+	}
+	if row < 0 {
+		t.Fatalf("no feeds line:\n%s", strings.Join(lines, "\n"))
+	}
+	line := lines[row]
+	for _, want := range []string{"feodo 412 (3h)", "urlhaus 21000 (9d) STALE", "pinned 3 (400d)"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("feeds line %q lacks %q", line, want)
+		}
+	}
+	col := func(sub string) int { return len([]rune(line[:strings.Index(line, sub)])) }
+	if c := fgAt(s, col("urlhaus"), row); c != tcell.ColorRed {
+		t.Errorf("stale feed color %v", c)
+	}
+	for _, name := range []string{"feodo", "pinned"} {
+		if c := fgAt(s, col(name), row); c == tcell.ColorRed {
+			t.Errorf("%s shown red", name)
+		}
+	}
+	if got := renderFeeds(nil, m.Now); got != "none" {
+		t.Errorf("no feeds: %q", got)
+	}
+}
+
+func TestFormatAge(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		0: "0s", 59 * time.Second: "59s", time.Minute: "1m", 59 * time.Minute: "59m", time.Hour: "1h",
+		47 * time.Hour: "47h", 48 * time.Hour: "2d", 8 * 24 * time.Hour: "8d",
+	} {
+		if got := formatAge(d); got != want {
+			t.Errorf("formatAge(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
+
+// The header shows the baseline's learning progress, then its state.
+func TestRenderBaseline(t *testing.T) {
+	until := time.Date(2026, 9, 28, 10, 20, 0, 0, time.Local)
+	tests := []struct {
+		b    *rules.BaselineStatus
+		want string
+	}{
+		{nil, "Baseline: none"},
+		{&rules.BaselineStatus{Learn: 10}, "Baseline: learning 0/10 (no packets yet)"},
+		{&rules.BaselineStatus{Learned: 4, Learn: 10, Until: until}, "Baseline: learning 4/10 until 10:20:00"},
+		{&rules.BaselineStatus{Learned: 10, Learn: 10, Until: until, Active: true}, "Baseline: active "},
+		{&rules.BaselineStatus{Learned: 10, Learn: 10, Until: until, Active: true, Anomalous: 2}, "Baseline: active, 2 anomalous"},
+	}
+	for _, tt := range tests {
+		m := fixedModel()
+		m.Header.Baseline = tt.b
+		s := newScreen(t)
+		Draw(s, m)
+		text := strings.Join(screenText(s), "\n")
+		s.Fini()
+		if !strings.Contains(text, tt.want) {
+			t.Errorf("header lacks %q:\n%s", tt.want, text)
+		}
+	}
+}
+
+func incidentModel(n int) *Model {
+	m := fixedModel()
+	m.Header.Source = "file attack.pcap"
+	m.Snap.AlertClock = t0.Add(2 * time.Hour)
+	for i := range n {
+		sev, chain := rules.SeverityHigh, "recon -> exploit"
+		if i == 1 {
+			sev, chain = rules.SeverityCritical, "recon -> exploit -> c2"
+		}
+		m.Snap.Incidents = append(m.Snap.Incidents, logging.Incident{
+			ID: fmt.Sprintf("inc-%016x", i), Kind: "multi_stage", Severity: sev, Score: 10 + i, Contributing: 3, Updates: i,
+			Entity: fmt.Sprintf("192.0.2.%d -> 198.51.100.10", i+1), Chain: chain, FirstSeen: t0.Add(time.Hour), LastSeen: t0.Add(time.Hour),
+		})
+	}
+	logging.SortIncidents(m.Snap.Incidents)
+	m.Feed = append(m.Feed, rules.Alert{Time: t0, SID: 1001301, Msg: "Multi-stage attack", Severity: "critical", Kind: rules.KindIncident})
+	return m
+}
+
+func TestRenderIncidents(t *testing.T) {
+	s := newScreen(t)
+	defer s.Fini()
+	m := incidentModel(7)
+	Draw(s, m)
+	lines := screenText(s)
+	// The panel is right under the header, most severe first; ages use
+	// the pcap's alert clock (created 1h before the newest alert).
+	_, hy, ok := findIn(lines, "Incidents (7 active)")
+	if !ok || hy != 5 {
+		t.Fatalf("incidents panel at line %d (found %v):\n%s", hy, ok, strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(lines[7], "[critical]") || !strings.Contains(lines[7], "192.0.2.2 -> 198.51.100.10") ||
+		!strings.Contains(lines[7], "recon -> exploit -> c2") || !strings.Contains(lines[7], " 1h") {
+		t.Errorf("first row %q", lines[7])
+	}
+	if !strings.Contains(lines[8], "[high]") || !strings.Contains(lines[8], "16") {
+		t.Errorf("second row %q", lines[8])
+	}
+	// Columns line up whatever the severity: tview escapes "[high]"
+	// differently from "[critical]", which once shifted a row.
+	if a, b := strings.Index(lines[7], "recon"), strings.Index(lines[8], "recon"); a < 0 || a != b {
+		t.Errorf("stages column at %d and %d:\n%s\n%s", a, b, lines[7], lines[8])
+	}
+	if !strings.Contains(lines[12], "+2 more") {
+		t.Errorf("overflow row %q", lines[12])
+	}
+	if _, _, ok := findIn(lines, "Multi-stage attack"); ok {
+		t.Error("an incident is in the raw alert feed")
+	}
+	// Expanded: every incident with its id.
+	m.ShowIncidents = true
+	Draw(s, m)
+	lines = screenText(s)
+	// At 160 columns the widest view fits: every row shows its id,
+	// ALERTS and UPDATES whole.
+	for i := range 7 {
+		if _, _, ok := findIn(lines, fmt.Sprintf("inc-%016x %6d %7d", i, 3, i)); !ok {
+			t.Errorf("incident %d: id, alerts or updates cut off", i)
+		}
+	}
+	for _, want := range []string{"All incidents [i: raw alerts]", "inc-0000000000000006", "192.0.2.7 -> 198.51.100.10"} {
+		if _, _, ok := findIn(lines, want); !ok {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if _, _, ok := findIn(lines, "SYN flood against one destination"); ok {
+		t.Error("raw alerts shown with the incident list")
+	}
+	// None.
+	m = fixedModel()
+	Draw(s, m)
+	if _, _, ok := find(s, "no active incidents"); !ok {
+		t.Error("no placeholder")
+	}
+}
+
+func TestDashboardIncidentKey(t *testing.T) {
+	fs := &fakeSources{}
+	fs.snap.Incidents = incidentModel(2).Snap.Incidents
+	d := New(fs.sources(), 0)
+	d.refresh = 10 * time.Millisecond
+	s, done := startDashboard(t, d)
+	d.SendAlert(alert(1, "raw one"))
+	waitScreen(t, d, s, "raw one", true)
+	waitScreen(t, d, s, "Incidents (2 active)", true)
+	s.InjectKey(tcell.KeyRune, 'i', tcell.ModNone)
+	waitScreen(t, d, s, "All incidents", true)
+	waitScreen(t, d, s, "raw one", false)
+	s.InjectKey(tcell.KeyRune, 'i', tcell.ModNone)
+	waitScreen(t, d, s, "raw one", true)
+	s.InjectKey(tcell.KeyRune, 'q', tcell.ModNone)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("q did not stop the dashboard")
 	}
 }

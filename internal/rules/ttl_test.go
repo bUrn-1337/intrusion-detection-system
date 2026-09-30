@@ -343,8 +343,8 @@ func TestTTLAnomalyCompletedFlows(t *testing.T) {
 	if got := establishedDists(d, netip.MustParseAddr(ttlSrc)); !slices.Equal(got, []int{7, 14, 21, 28}) {
 		t.Errorf("established %v, want [7 14 21 28]: completed flows must still be samples", got)
 	}
-	if ts := e.Stats().Tables[TableTTLFlows]; ts.Keys != int64(len(ttls)) {
-		t.Errorf("ttl_flows keys %d, want %d", ts.Keys, len(ttls))
+	if ts := e.Stats().Tables[TableTCPFlows]; ts.Keys != int64(len(ttls)) {
+		t.Errorf("tcp_flows keys %d, want %d", ts.Keys, len(ttls))
 	}
 	if len(d.pending) != 0 {
 		t.Errorf("%d held handshakes left after completion", len(d.pending))

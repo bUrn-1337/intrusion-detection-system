@@ -1,0 +1,27 @@
+{
+  "description": "Three TLS clients: 10.0.0.5's ClientHello has the JA3 listed with label ExampleBot (critical rule), 10.0.0.6's a JA3 listed without a label (high rule), 10.0.0.7's is not listed.",
+  "alerts": [
+    {
+      "sid": 1001003,
+      "kind": "alert",
+      "src_ip": "10.0.0.5",
+      "dst_port": 443,
+      "details": {
+        "ja3_feed": "example_ja3",
+        "ja3_hash": "b54538bcff721c2cd9de6254e79a4406",
+        "label": "ExampleBot"
+      }
+    },
+    {
+      "sid": 1001004,
+      "kind": "alert",
+      "src_ip": "10.0.0.6",
+      "dst_port": 443,
+      "details": {
+        "ja3_feed": "example_ja3",
+        "ja3_hash": "1e7c622032b0cb79401b0f7be3793a1a"
+      }
+    }
+  ],
+  "absent_sids": []
+}

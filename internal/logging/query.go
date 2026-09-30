@@ -42,7 +42,7 @@ type Filter struct {
 	Src, Dst    netip.Prefix  // alert source / destination address
 	SID         int
 	Category    string
-	Kind        string // rules.KindAlert or rules.KindSummary
+	Kind        string // rules.KindAlert, KindSummary, KindIncident or KindIncidentUpdate
 }
 
 // Validate checks the filter's enumerated fields.
@@ -56,9 +56,9 @@ func (f Filter) Validate() error {
 		return fmt.Errorf("unknown severity %q (want low, medium, high or critical)", f.MinSeverity)
 	}
 	switch f.Kind {
-	case "", rules.KindAlert, rules.KindSummary:
+	case "", rules.KindAlert, rules.KindSummary, rules.KindIncident, rules.KindIncidentUpdate:
 	default:
-		return fmt.Errorf("unknown kind %q (want alert or summary)", f.Kind)
+		return fmt.Errorf("unknown kind %q (want alert, summary, incident or incident_update)", f.Kind)
 	}
 	if f.Since < 0 {
 		return errors.New("negative -since")

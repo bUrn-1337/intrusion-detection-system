@@ -1,0 +1,17 @@
+{
+  "description": "TLS to an unlisted server address: SNI www.example.net is not listed, SNI C2.Example.Net is (c2.example.net, compared without case).",
+  "alerts": [
+    {
+      "sid": 1001002,
+      "kind": "alert",
+      "src_ip": "10.0.0.7",
+      "dst_ip": "192.0.2.43",
+      "dst_port": 443,
+      "details": {
+        "field": "sni",
+        "name": "c2.example.net",
+        "indicator": "c2.example.net"
+      }
+    }
+  ]
+}

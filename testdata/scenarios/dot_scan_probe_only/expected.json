@@ -1,0 +1,5 @@
+{
+  "description": "A scanner probes TCP 853 on two hosts: one refuses with RST, the other answers SYN/ACK and is reset (half-open). No data reaches port 853, so the DoT policy rule, which needs payload, stays quiet.",
+  "alerts": [],
+  "absent_sids": [1000112]
+}

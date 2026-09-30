@@ -1,0 +1,17 @@
+{
+  "description": "The same exploit, but the connection back to 203.0.113.9:4444 comes 10 minutes later, past the 120s callback window: no incident.",
+  "alerts": [
+    {
+      "sid": 1000210,
+      "kind": "alert",
+      "src_ip": "203.0.113.9",
+      "dst_ip": "10.0.0.80"
+    }
+  ],
+  "allow_extra": false,
+  "strict_sids": [
+    1001301,
+    1001302,
+    1001303
+  ]
+}

@@ -77,14 +77,16 @@ pcap is the same on every run.
 | `alerts` | each entry must match **exactly one** alert record |
 | `absent_sids` | sids that must not appear at all |
 | `allow_extra` | if `false` (the default), any alert not matched by an entry fails |
+| `strict_sids` | with `allow_extra`, records of these sids must still all be matched: extra raw alerts are fine, an extra incident is not |
 | `args` | extra `ids run` flags, e.g. `["-whitelist", "10.0.0.0/8"]` |
 | `rules` | rules file relative to the scenario directory |
-| `extra_rules` | lines appended to the rules file (default or `rules`) for this scenario only, e.g. `["arpbind 10.1.1.1 02:00:00:00:00:01"]` or a pass rule |
+| `extra_rules` | lines appended to the rules file (default or `rules`) for this scenario only, e.g. `["arpbind 10.1.1.1 02:00:00:00:00:01"]` or a pass rule. `{scenario}` is replaced by the scenario directory (`feed ip bad {scenario}/feed.txt`); `feeds/` paths resolve as in the rules file |
 | `log_must_not_contain` | strings (credentials) that must never appear in the log or on stdout |
+| `log_must_contain` | strings (load warnings, events) that must appear in the log |
 | `stream_stats` | bounds on counters of the shutdown stats record's `stream` object, e.g. `{"overlap_conflicts": [1, 1], "evictions": [2000, 3999]}` |
 
-An alert entry matches on stable fields only: `sid` and `kind` (`alert`
-or `summary`) are required; `src_ip`, `dst_ip`, `src_port`, `dst_port`,
+An alert entry matches on stable fields only: `sid` and `kind` (`alert`,
+`summary`, `incident` or `incident_update`) are required; `src_ip`, `dst_ip`, `src_port`, `dst_port`,
 `count` (an inclusive `[min, max]`) and `details` (a subset of the alert's
 details) are optional. Timestamps are never compared. Entries are matched
 in order, so list the more specific ones first.
@@ -94,6 +96,30 @@ A rule that keeps matching logs one `alert`, then one `summary` whose
 detector, every probe or event after the threshold is a match: a scan of
 1000 ports with `distinct_ports:20` logs an alert and a summary with
 count 981.
+
+### Incident scenarios
+
+An incident scenario plays a whole attack, often over hours of generated
+time (`w.Wait`), and cares about the incident records, not every raw
+alert along the way. Set `allow_extra: true` with `strict_sids:
+[1001301, 1001302, 1001303]` so the raw alerts may vary but every
+incident and update must be listed: a scenario that expects one incident
+then fails on a second one. List the raw alerts that make the story
+(the scan, the exploit) too, with `details: {"attribution": ...}` where
+attribution is the point. Match incidents on `details` such as `kind`,
+`chain`, `attacker`, `exploited_by` and `incident_id` (stable, so it can
+be compared). The helpers `incScan`, `incRequest` (one HTTP request on
+its own connection), `incLog4Shell`, `incSQLi` and `incC2Hello` (a TLS
+ClientHello to the feed-listed `c2.example.net`) build the stages; the
+attacker is 203.0.113.9 and the victim, a web server, 10.0.0.80.
+
+Each incident kind has a scenario that fires and look-alikes that must
+not: `kill_chain_full` (multi_stage and compromised_host),
+`incident_updates_limited` (over 200 alerts, one incident and one update
+per stage gained), `callback_after_exploit` and `callback_too_late`,
+`recon_only`, `unrelated_alerts`, `spoofed_framing` (forged traffic from
+an innocent host never names it), `reverse_order` and
+`stage_window_expired`.
 
 ## Example: adding `ftp_plaintext_pass`
 

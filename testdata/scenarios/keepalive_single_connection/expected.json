@@ -1,0 +1,5 @@
+{
+  "description": "Look-alike: one long TLS connection from 10.0.0.5 to 203.0.113.79:443 exchanges a small record every 60s for 20 minutes. Packets within a connection are not connection starts, so the key has one event: no beacon alert.",
+  "alerts": [],
+  "absent_sids": [1001101]
+}

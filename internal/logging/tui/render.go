@@ -26,6 +26,20 @@ type Header struct {
 	ReloadAt time.Time
 	// Done is set once a pcap file has been read to the end.
 	Done bool
+	// Feeds are the loaded threat-intel feeds; each is shown with its
+	// size and age, red once older than its max age.
+	Feeds []FeedStatus
+	// Baseline is the state of the first detect:baseline rule; nil if
+	// there is none.
+	Baseline *rules.BaselineStatus
+}
+
+// FeedStatus is a feed's header entry.
+type FeedStatus struct {
+	Name    string
+	Entries int
+	ModTime time.Time
+	MaxAge  time.Duration // 0: never stale
 }
 
 // Health is capture, reassembly and logging health.
@@ -53,14 +67,20 @@ type Model struct {
 	Snap   logging.Snapshot
 	Paused bool
 	Feed   []rules.Alert // oldest first
+	// ShowIncidents switches the bottom panel from the raw alert feed to
+	// the full incident list (key i).
+	ShowIncidents bool
 }
 
 // View holds the dashboard's panels.
 type View struct {
 	Root                                              *tview.Flex
 	header, traffic, health, proto, talkers, alerting *tview.TextView
-	alerts                                            *tview.TextView
+	incidents, alerts                                 *tview.TextView
 }
+
+// IncidentRows is how many incidents the top panel lists.
+const IncidentRows = 5
 
 func panel(title string) *tview.TextView {
 	t := tview.NewTextView().SetDynamicColors(true).SetWrap(false)
@@ -71,13 +91,14 @@ func panel(title string) *tview.TextView {
 // NewView builds the panel layout.
 func NewView() *View {
 	v := &View{
-		header:   panel("IDS"),
-		traffic:  panel("Traffic"),
-		health:   panel("Capture health"),
-		proto:    panel("Protocols"),
-		talkers:  panel("Top talkers (60s)"),
-		alerting: panel("Top alerting sources (60s)"),
-		alerts:   panel("Recent alerts"),
+		header:    panel("IDS"),
+		incidents: panel("Incidents"),
+		traffic:   panel("Traffic"),
+		health:    panel("Capture health"),
+		proto:     panel("Protocols"),
+		talkers:   panel("Top talkers (60s)"),
+		alerting:  panel("Top alerting sources (60s)"),
+		alerts:    panel("Recent alerts"),
 	}
 	v.alerts.SetScrollable(true)
 	row1 := tview.NewFlex().
@@ -88,7 +109,8 @@ func NewView() *View {
 		AddItem(v.talkers, 0, 3, false).
 		AddItem(v.alerting, 0, 2, false)
 	v.Root = tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(v.header, 4, 0, false).
+		AddItem(v.header, 5, 0, false).
+		AddItem(v.incidents, IncidentRows+4, 0, false).
 		AddItem(row1, 12, 0, false).
 		AddItem(row2, 13, 0, false).
 		AddItem(v.alerts, 0, 1, false)
@@ -103,13 +125,73 @@ func (v *View) Render(m *Model) {
 	v.proto.SetText(RenderProtocols(m))
 	v.talkers.SetText(RenderTalkers(m))
 	v.alerting.SetText(RenderAlerting(m))
-	title := " Recent alerts "
+	v.incidents.SetTitle(fmt.Sprintf(" Incidents (%d active) ", len(m.Snap.Incidents)))
+	v.incidents.SetText(RenderIncidents(m, IncidentRows))
+	if m.ShowIncidents {
+		v.alerts.SetTitle(" All incidents [i: raw alerts] ")
+		v.alerts.SetText(RenderIncidents(m, 0))
+		v.alerts.ScrollToBeginning()
+		return
+	}
+	title := " Recent alerts [i: incidents] "
 	if m.Paused {
 		title = " Recent alerts [PAUSED - p to resume] "
 	}
 	v.alerts.SetTitle(title)
 	v.alerts.SetText(RenderAlerts(m))
 	v.alerts.ScrollToEnd()
+}
+
+// incidentClock is the time incidents age by: the wall clock live, the
+// newest alert time when reading a pcap file (whose alerts carry packet
+// times).
+func incidentClock(m *Model) time.Time {
+	if strings.HasPrefix(m.Header.Source, "file ") && !m.Snap.AlertClock.IsZero() {
+		return m.Snap.AlertClock
+	}
+	return m.Now
+}
+
+// RenderIncidents renders the active incidents, most severe first, then
+// by score: severity, score, kind, entity, the stage chain and the age
+// since the incident was created. limit > 0 lists at most limit and says
+// how many more there are; limit 0 lists all, with their ids.
+func RenderIncidents(m *Model, limit int) string {
+	in := m.Snap.Incidents
+	if len(in) == 0 {
+		return " [green]no active incidents[-]"
+	}
+	now := incidentClock(m)
+	var b strings.Builder
+	// Cells are cut and padded before escaping: tview.Escape lengthens
+	// text like "[high]", which would throw off %-Ns padding.
+	fmt.Fprintf(&b, " [::b]%s %6s  %s %s %s %5s[::-]", cell("SEV", 10), "SCORE", cell("KIND", 16), cell("ENTITY", 34), cell("STAGES", 42), "AGE")
+	if limit == 0 {
+		b.WriteString("[::b]  " + cell("ID", 20) + " ALERTS UPDATES[::-]")
+	}
+	for i, x := range in {
+		if limit > 0 && i == limit {
+			fmt.Fprintf(&b, "\n [gray]+%d more (i: all incidents)[-]", len(in)-limit)
+			break
+		}
+		fmt.Fprintf(&b, "\n [%s]%s %6d  %s %s %s %5s", SeverityColor(x.Severity), cell("["+x.Severity+"]", 10), x.Score,
+			cell(x.Kind, 16), cell(x.Entity, 34), cell(x.Chain, 42), formatAge(max(now.Sub(x.FirstSeen), 0)))
+		if limit == 0 {
+			fmt.Fprintf(&b, "  %s %6d %7d", cell(x.ID, 20), x.Contributing, x.Updates)
+		}
+		b.WriteString("[-]")
+	}
+	return b.String()
+}
+
+// cell cuts s to w runes (ending in "…" when cut), pads it to w and
+// escapes it for tview.
+func cell(s string, w int) string {
+	r := []rune(s)
+	if len(r) > w {
+		r = append(r[:w-1], '…')
+	}
+	return tview.Escape(string(r) + strings.Repeat(" ", w-len(r)))
 }
 
 // RenderHeader renders the header panel.
@@ -131,8 +213,53 @@ func RenderHeader(m *Model) string {
 		}
 		reload = fmt.Sprintf("[%s]%s[-] at %s", color, tview.Escape(h.Reload), h.ReloadAt.Format("15:04:05"))
 	}
-	return fmt.Sprintf(" Source: [::b]%s[::-]   Uptime: %s   Rules loaded: %d   Last reload: %s\n [gray]keys: q quit   p pause alerts   r reload rules[-]",
-		src, formatUptime(up), h.Rules, reload)
+	return fmt.Sprintf(" Source: [::b]%s[::-]   Uptime: %s   Rules loaded: %d   Last reload: %s\n Feeds: %s\n Baseline: %s   [gray]keys: q quit   p pause alerts   i incidents/alerts   r reload rules[-]",
+		src, formatUptime(up), h.Rules, reload, renderFeeds(h.Feeds, m.Now), renderBaseline(h.Baseline))
+}
+
+// renderBaseline describes the baseline: learning (with progress and the
+// packet time learning ends), active, or active with anomalous metrics.
+func renderBaseline(b *rules.BaselineStatus) string {
+	switch {
+	case b == nil:
+		return "none"
+	case b.Until.IsZero():
+		return fmt.Sprintf("[yellow]learning 0/%d (no packets yet)[-]", b.Learn)
+	case !b.Active:
+		return fmt.Sprintf("[yellow]learning %d/%d until %s[-]", b.Learned, b.Learn, b.Until.Local().Format("15:04:05"))
+	case b.Anomalous > 0:
+		return fmt.Sprintf("[red]active, %d anomalous[-]", b.Anomalous)
+	}
+	return "[green]active[-]"
+}
+
+func renderFeeds(fs []FeedStatus, now time.Time) string {
+	if len(fs) == 0 {
+		return "none"
+	}
+	parts := make([]string, len(fs))
+	for i, f := range fs {
+		age := max(now.Sub(f.ModTime), 0)
+		s := fmt.Sprintf("%s %d (%s)", tview.Escape(f.Name), f.Entries, formatAge(age))
+		if f.MaxAge > 0 && age > f.MaxAge {
+			s = "[red]" + s + " STALE[-]"
+		}
+		parts[i] = s
+	}
+	return strings.Join(parts, "   ")
+}
+
+// formatAge is a coarse age: 45s, 12m, 5h, 9d.
+func formatAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
 func formatUptime(d time.Duration) string {
@@ -240,11 +367,15 @@ func SeverityColor(sev string) string {
 	return "white"
 }
 
-// RenderAlerts renders the alert feed, newest last.
+// RenderAlerts renders the raw alert feed (alerts and summaries, not
+// incidents), newest last.
 func RenderAlerts(m *Model) string {
 	var b strings.Builder
-	for i, a := range m.Feed {
-		if i > 0 {
+	for _, a := range m.Feed {
+		if logging.IsIncident(&a) {
+			continue
+		}
+		if b.Len() > 0 {
 			b.WriteByte('\n')
 		}
 		kind := ""

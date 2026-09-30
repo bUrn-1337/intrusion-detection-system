@@ -1,0 +1,7 @@
+# Example domain feed (feed domain NAME PATH): one name per line; a name
+# also matches all its subdomains (c2.example.net lists
+# x.c2.example.net). A leading "*." is accepted and ignored. Names under
+# the reserved example.com/.net/.org only. Real data: make feeds.
+malware.example.com
+c2.example.net
+*.phish.example.org

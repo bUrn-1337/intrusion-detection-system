@@ -140,6 +140,104 @@ is never learned from traffic, so `mac_change` and `flip_flop` never fire
 for it: `static_violation` covers it, on the first packet that claims
 another MAC.
 
+### feed
+
+`feed TYPE NAME PATH [max_age:DURATION]` loads a threat-intel feed for the
+[`ip_feed`, `domain_feed` and `ja3_feed`](#ip_feed-domain_feed-ja3_feed)
+options. TYPE is `ip`, `domain` or `ja3`; NAME is letters, digits, `_`
+and `-`; a relative PATH is relative to the rules file. Like `var`, it can
+come anywhere in the file.
+
+```
+feed ip feodo feeds/feodo_ip.txt
+feed domain urlhaus feeds/urlhaus_domain.txt max_age:2d
+feed ja3 examples feeds/example_ja3.txt max_age:0
+```
+
+A feed file has one entry per line; `#` starts a comment, blank lines are
+skipped, and a UTF-8 BOM and CRLF line ends are accepted.
+
+| type | entry | matches |
+|---|---|---|
+| `ip` | an IPv4 or IPv6 address or CIDR (`203.0.113.7`, `198.51.100.0/24`, `2001:db8:c2::/48`) | the address or any address in the range |
+| `domain` | a domain name, optionally `*.`-prefixed or with a trailing dot | the name and all its subdomains, ignoring case: `c2.example.net` matches `x.c2.example.net`, not `notc2.example.net` |
+| `ja3` | 32 hex digits, optionally `,label` (a malware family) | the JA3 MD5, ignoring case |
+
+**Rejected lines.** A bad line is skipped with a warning naming
+`file:line`, and the rest of the feed still loads:
+
+- an `ip` entry that is not an address or CIDR, or is (or overlaps) a
+  private or reserved range: RFC 1918, loopback, link-local, CGNAT
+  (100.64.0.0/10), multicast, unspecified, broadcast, IPv6 ULA, and
+  IPv4-mapped IPv6. Such an entry is always a mistake in a feed of
+  external indicators, and would alert on your own network;
+- a `domain` entry that is an address, a single label (`com` would match
+  a whole TLD), or has an empty or over-63-byte label, a character other
+  than letters, digits, `-` and `_`, or more than 253 bytes;
+- a `ja3` entry that is not 32 hex digits;
+- a line over 4096 bytes, and every line after the 2,000,000th entry.
+
+The first 20 problems are listed, then a count of the rest. Warnings are
+logged as `warning` event records on start and on every reload (and
+printed with `-no-tui`); they never stop loading. A missing or unreadable
+file, a directory, a device or a FIFO is an error: the rules do not load
+(on a reload, the old rules and feeds stay).
+
+**Staleness.** A feed is as old as its file's modification time. Once
+older than `max_age` (default `7d`; `Nd` or a Go duration like `36h`;
+`0` never goes stale) it is shown red in the dashboard header, which
+lists every feed with its size and age, and a `warning` event is logged
+when the rules are loaded. The periodic stats record lists every feed's
+entries, rejected lines and age.
+
+**Reloading.** Feeds are read when the rules are: at start, on SIGHUP and
+on the dashboard's `r` key. Refresh the files, then reload.
+
+**Getting data.** `make feeds` runs `scripts/feeds.sh`, which downloads
+four public feeds into `feeds/` and converts them to this format. Each
+file is replaced only after a successful download, so a failed run keeps
+the old file, and it goes stale. `feeds/*.txt` is not committed (except
+the `example_*` files): the data changes hourly and belongs to its
+providers. Their terms, as of 2026-09-28:
+
+| file | source | terms |
+|---|---|---|
+| `feodo_ip.txt` | abuse.ch Feodo Tracker botnet C2 IPs | CC0: commercial and non-commercial use without limitation |
+| `urlhaus_domain.txt` | abuse.ch URLhaus host file (malware-distribution hosts) | abuse.ch fair use principles: free for not-for-profit use; commercial use may need a paid subscription |
+| `sslbl_ja3.txt` | abuse.ch SSLBL JA3 fingerprints, labeled with the family | CC0. The list has not been updated since 2021-08-03 |
+| `spamhaus_drop.txt` | Spamhaus DROP, IPv4 and IPv6 | Spamhaus DROP Terms of Use: free; the Spamhaus name may not be used in marketing; fetch at most hourly |
+
+### stage
+
+`stage NAME CATEGORY[,CATEGORY...]` maps alert categories to a kill-chain
+stage for [`detect:incident`](#detectincident). The stages are ordered as
+they appear in the file, first to last (at most 16). Like `var`, the
+directives can come anywhere in the file. `rules.conf` defines:
+
+```
+stage recon recon
+stage exploit web,web-attack,evasion,credential
+stage c2 malware,threat-intel
+stage exfil exfiltration
+stage impact dos
+```
+
+`spoofing`, `anomaly`, `policy`, `dns` and `incident` are in no stage: such
+alerts never make a chain, but they still count towards a victim's
+[score](#score). `web-attack` (the category of the stream-layer HTTP rules)
+is in `exploit` with `web`.
+
+Errors are reported as `file:line`: a malformed line, a name or category
+that is not letters, digits, `_` and `-`, a stage defined twice, a
+category listed twice or already mapped to another stage (the error names
+the line of the first mapping), more than 16 stages, and an unknown
+category. A category is known when it is one of the standard categories
+above (`recon`, `web`, `web-attack`, `evasion`, `credential`, `malware`,
+`threat-intel`, `exfiltration`, `dos`, `spoofing`, `anomaly`, `policy`,
+`dns`, `incident`) or a rule in the file uses it, so a typo like
+`recn` is caught. A file without `stage` lines is valid; it just cannot
+have `detect:incident` rules.
+
 ## Options
 
 Options are `key:value;` pairs inside the parentheses (the last `;` is
@@ -306,7 +404,7 @@ alert tcp any any -> any any (msg:"TLS without SNI"; app_proto:tls; app_field:sn
 | dns | `id`, `is_response`, `rcode`, `qdcount`, `ancount`, `nscount`, `arcount`, `dns_len`, `qname`, `qtype`, `qtype_name`, `qclass` (first question only) |
 | http | requests: `method`, `uri`, `uri_decoded`, `query`, `version`, `request_complete`; responses: `status_code`; headers: `host`, `user_agent`, `content_type`, `content_length`, `auth_basic`, `headers_raw` |
 | ftp | `command`, `argument` (the PASS argument is always `<redacted>`), `response_code` |
-| tls | `sni`, `sni_status` (`found`, `absent`, `truncated`) |
+| tls | `sni`, `sni_status` (`found`, `absent`, `truncated`), `ja3`, `ja3_hash` (complete ClientHellos; see [ja3_feed](#ip_feed-domain_feed-ja3_feed)) |
 
 HTTP fields in detail:
 
@@ -361,6 +459,43 @@ name, a `[a,b]` list, or a name-list variable. `dns.google` matches
 ```
 alert tcp any any -> any 443 (msg:"DoH"; app_proto:tls; app_domain:sni,$DOH_SERVERS; sid:1000111;)
 ```
+
+### ip_feed, domain_feed, ja3_feed
+
+Match against a [feed](#feed). Each can be given once per rule, cannot be
+combined with `detect`, and names a feed of the right type defined in the
+same file.
+
+- `ip_feed:NAME;` matches when the source or destination address is in
+  the feed. Details: `ip_feed`, `side` (`src`, `dst` or `both`) and
+  `indicator` (the listed address or addresses). Alerts are deduplicated
+  per (listed address, other address), so one host talking to one C2
+  is one alert per window, whatever the ports. Not for `arp` rules.
+- `domain_feed:NAME[,KEY];` matches when an application field is a listed
+  domain or a subdomain of one. By default the fields are `qname` (DNS
+  queries; the response repeats the name and is not a second match),
+  `sni` (TLS) and `host` (HTTP, the port stripped); KEY checks that one
+  field only. Details: `domain_feed`, `field`, `name` (the value seen)
+  and `indicator` (the listed entry).
+- `ja3_feed:NAME[,labeled|unlabeled];` matches when a ClientHello's
+  `ja3_hash` is listed; `labeled` and `unlabeled` restrict it to entries
+  with or without a label. Details: `ja3_feed`, `ja3_hash`, `label`.
+
+```
+alert ip any any -> any any (msg:"Feodo C2"; ip_feed:feodo; sid:1001011; severity:high; category:threat-intel;)
+alert ip any any -> any any (msg:"URLhaus host"; domain_feed:urlhaus; sid:1001013; severity:high; category:threat-intel;)
+alert tcp any any -> any any (msg:"Malware JA3"; ja3_feed:sslbl,labeled; sid:1001014; severity:critical; category:threat-intel;)
+```
+
+`domain_feed` and `ja3_feed` need protocol `ip`, `tcp` or `udp`.
+
+**JA3** is the MD5 of `version,ciphers,extensions,groups,point_formats`
+(decimal, `-`-joined) from the ClientHello, with GREASE values (RFC 8701)
+left out. It is computed only from a complete ClientHello, reassembled
+across segments if need be; a truncated or malformed one has none.
+Chrome and other browsers have shuffled their extension order since 2023,
+so their JA3 changes per connection and cannot be listed; malware on a
+fixed TLS stack keeps one. JA4 is not implemented.
 
 ### regex
 
@@ -915,6 +1050,315 @@ Details: `detector`, `track` (`by_dst`), `tracked_addr`,
 `nxdomain_names`, `high_entropy_names`, `min_entropy`, `seconds` and
 `sample_qname`.
 
+### detect:beacon
+
+Command-and-control malware polls its server on a timer, usually with
+some random jitter. `detect:beacon` looks for that regularity in when
+connections start, whatever they carry. Protocol `ip`, `tcp` or `udp`,
+one-way (`->`) only: the rule's source is the host that beacons.
+
+A key is (source, destination, destination port, TCP or UDP). Its
+events are connection starts:
+
+- TCP: a SYN without ACK that is not a retransmission (the same 4-tuple
+  and sequence number within 60s);
+- UDP: the first packet of a 4-tuple, or the first after 30s without a
+  packet of the flow in either direction. The other side's packets keep
+  the flow alive and are never events.
+
+Packets inside a connection are never events, so a long-lived connection
+with keepalives counts once. Each key keeps its last 32 event times. A
+check passes when
+
+- the median interval between consecutive events is within
+  [`min_interval`, `max_interval`], and
+- at least `min_fraction` of the intervals are within `jitter` of the
+  median m or of twice it: [m(1-j), m(1+j)] or [2m(1-j), 2m(1+j)].
+
+Checks run only at checkpoints: the `min_events`-th event, then every
+8th event from the 16th (with the default 10: events 10, 16, 24, 32,
+40, ...). The rule fires when `persistence` checks in a row pass; a
+failed check restarts the count. With the defaults a steady beacon fires
+at its 32nd connection start.
+
+The median resists one long gap (a sleeping laptop) or a burst of
+retries, which would move a mean arbitrarily far. For an even number of
+intervals it is the lower middle one, so it is always an interval that
+happened. The 2x band counts a missed beat (a failed connection, or a
+beacon that skips rounds) as regular.
+
+**Why checkpoints and persistence.** Checking on every event and firing
+on the first pass made random traffic fire: two wide bands cover much of
+the range of random gaps, and with dozens of chances one check passes by
+luck. A Monte Carlo simulation of the check (3000 runs per cell, 10000
+to confirm the choice) gave, for the default options:
+
+| variant | uniform 1-60s gaps, FP by 100 conns | exponential gaps (mean 30s), FP | 60s ±20% beacon, detected by 32 | 30% of beats missed, detected by 32 |
+|---|---|---|---|---|
+| every event, first pass (rev 1) | 45% | 5.8% | 100% | 99.8% |
+| jitter 0.15 | 3.2% | 0.3% | 98.9% | 89.1% |
+| persistence 4, every event | 11% | 0.4% | 100% | 99% |
+| at most 30% of intervals via the 2x band | 29% | 4.5% | 100% | 90% |
+| checkpoints only | 21% | 1.5% | 100% | 99% |
+| checkpoints, persistence 3 | 0.7-1.0% | 0% | 99.9% | 92% |
+| **checkpoints, persistence 4 (default)** | **0.1-0.2%** | **0%** | **99.2%** | **83%** |
+
+Persistence 3 meets a 1% false-positive target only at the limit, so the
+default is 4. Checks on overlapping windows are correlated, so random
+gaps rarely pass four in a row, while a real timer passes every one.
+
+| option | default | |
+|---|---|---|
+| `min_events:N;` | 10 | 3 to 32 connection starts |
+| `min_interval:S;` | 10 | seconds; faster is a retry loop or a burst, not a timer |
+| `max_interval:S;` | 3600 | seconds |
+| `jitter:F;` | 0.25 | above 0 and below 0.5, so the two bands stay apart |
+| `min_fraction:F;` | 0.7 | above 0, at most 1 |
+| `persistence:N;` | 4 | 1 to 8 checks in a row that must pass |
+| `allow:NAMES;` | none | names never counted (and their subdomains) |
+| `allow_addrs:ADDRS;` | none | destinations never counted |
+| `allow_ports:PORTS;` | 123 | destination ports never counted; replaces the default |
+
+Allowed names are matched against the key's learned name: the first TLS
+SNI, HTTP Host or DNS query name seen on the key's connections. It is
+checked when the rule would fire, since the name comes after the first
+SYN. Port 123 is allowed by default because NTP clients poll on a timer
+by design. UDP to port 53 is never counted, whatever the options: a
+resolver serves every name the host looks up, and stubs and caches
+re-query names as their TTLs expire, so queries to it are periodic
+without saying anything about one destination. Beacons over DNS are the
+job of `dns_tunnel`.
+
+A key alerts once while it stays periodic; a beacon slower than the 60s
+dedup window would otherwise alert on every beat. A check that fails (the
+median leaves the range, or too few intervals fit) re-arms it. Keys live
+in an LRU table capped at the engine's key limit, and a key without an event for 6h
+of packet time is dropped.
+
+`rules.conf` has one rule (1001101) for sources in `$HOME_NET`, with
+`allow:$BEACON_ALLOW`: the connectivity-check hosts of Android, Windows,
+Apple and Firefox, which poll by design.
+
+Details: `detector`, `median`, `fraction` (of intervals in either band),
+`count` (events judged, at most 32), `events` (since the key was
+created), `checks` (checks in a row that passed), `name`, `intervals` (the last 8), `jitter` and
+`min_fraction`. Alerts are deduplicated per (sid, source, destination,
+port).
+
+### detect:baseline
+
+Learns how much traffic is normal and fires when a metric stays far above
+it. It suits volume attacks, exfiltration and worm-like spreading, none of
+which is visible in one packet. Protocol `ip`, `tcp`, `udp` or `icmp`, and
+`<>` is allowed. The rule's header selects the packets that are counted:
+`alert ip $HOME_NET any <> any any` counts all traffic to and from the
+network.
+
+Packet time is cut into intervals of `interval` seconds, aligned to
+multiples of the interval. Each interval measures:
+
+| metric | value | floor | min_level |
+|---|---|---|---|
+| `packets` | packets per second | 10 | 10 |
+| `bytes` | bytes per second (wire length) | 10000 | 10000 |
+| `conns` | new TCP connections per second (SYN without ACK) | 0.5 | 2 |
+| `dns` | DNS queries per second | 0.2 | 1 |
+| `dsts` | distinct destination addresses | 10 | 20 |
+| `fanout` | per host the rule's source address matches: the distinct destinations it sent to. Each host has its own baseline | 10 | 20 |
+
+| option | default | |
+|---|---|---|
+| `interval:S;` | 60 | seconds, at most 3600 |
+| `learn_intervals:N;` | 10 | 2 to 1000 intervals learned before anything fires |
+| `threshold:F;` | 4 | 1 to 100: the score, in deviations, that makes an interval anomalous |
+| `sustain:N;` | 3 | 1 to 60 anomalous intervals in a row before the rule fires |
+| `max_step:F;` | 0.2 | above 0, at most 1: the largest step of one update, as a fraction of the current value |
+| `metrics:LIST;` | all | comma-separated metrics to watch, e.g. `metrics:packets,fanout;` |
+| `min_level:M=N,...;` | see the table | the smallest value of each listed metric that can fire upwards, e.g. `min_level:dns=5,conns=10;`; unlisted metrics keep their default, 0 disables it |
+| `drop:packets;` | off | also alert when packets fall below a tenth of the baseline (a link or a sensor feed going quiet). Only `packets` is allowed |
+
+**Model.** Each metric keeps an exponentially weighted moving average
+(alpha 0.1, about the last 10 intervals) of its value and of its absolute
+deviation from that mean. An interval's score is (value − mean) /
+max(deviation, floor). The absolute deviation replaces the usual standard
+deviation because traffic volume is heavy-tailed: one burst, squared,
+dominates a variance estimate for many intervals and hides the next
+burst, while it moves the absolute deviation only in proportion. The
+floor keeps a metric that never varies (deviation near 0) from alerting
+on a change of one packet.
+
+**min_level.** An interval is anomalous upwards only when its value is
+also at least the metric's `min_level`. A metric learned at 0 (a host
+that never sent DNS queries, a quiet lab network) otherwise fires on a
+trickle: 0.9 queries/s against a mean of 0 and the 0.2 floor scores 4.5.
+The defaults are levels below which a rise is not worth an alert on its
+own: 10 packets/s, 10 kB/s, 2 new connections/s, 1 DNS query/s, 20
+destinations per interval. `drop` alerts are unaffected.
+
+**Learning.** For the first `learn_intervals` intervals the mean and
+deviation are plain averages, each interval weighing the same, and
+nothing fires. The IDS logs a `baseline` event when the first packet
+arrives, `baseline learning until <time> (sid N: L intervals of I)`, and
+another when learning ends, `baseline active (sid N: ...)`. The dashboard
+header shows `Baseline: learning L/N until HH:MM:SS`, then `active`, or
+`active, K anomalous` while metrics are anomalous. Each `fanout` host
+learns from its own first interval.
+
+**Firing.** The rule fires when a metric has been anomalous for `sustain`
+intervals in a row, once per episode. A normal interval ends the episode.
+Global metrics alert with no addresses. `fanout` alerts carry the host as
+the source address. Alerts are deduplicated per (sid, host, metric).
+
+**Poisoning.** An attacker who raises traffic could teach the baseline
+that the attack is normal. Three things resist that:
+
+- an anomalous interval does not update the baseline (it is frozen);
+- one update moves the mean or the deviation by at most `max_step` of its
+  value (or of the floor, if that is higher);
+- a slow ramp that stays under `threshold` at every step is still
+  learned, a limit of every adaptive baseline (the boiling frog, under
+  Known gaps in [ARCHITECTURE.md](ARCHITECTURE.md)).
+
+After 60 anomalous intervals in a row a metric starts updating again,
+still at most `max_step` per interval. A lasting change of the network is
+then learned instead of silencing the metric for good; it has alerted by
+then.
+
+**Time.** Intervals close on the first packet after their end, since the
+engine clock is packet time. A link that goes completely silent therefore
+cannot trigger `drop` until its next packet. Intervals without packets
+count as zeros, at most 60 in a row; after a longer gap the next interval
+starts at the new packet.
+
+**Memory.** Distinct addresses are counted with a fixed bitmap (linear
+counting: 65536 bits for `dsts`, 4096 per `fanout` host), accurate to a
+few percent. At most 10000 hosts are kept (fewer if the engine's key
+limit is lower), in an LRU table (`baseline_hosts`). A host silent for 24
+hours of packet time is dropped.
+
+`rules.conf` has one rule (1001201) for all traffic of `$HOME_NET`, with
+the defaults.
+
+```
+alert ip $HOME_NET any <> any any (msg:"Traffic far above its learned baseline"; detect:baseline; sid:1001201; severity:medium; category:anomaly;)
+alert ip 10.0.0.0/8 any -> any any (msg:"Host fan-out"; detect:baseline; metrics:fanout; interval:300; sustain:2; sid:1001202;)
+```
+
+Details: `detector`, `metric`, `unit`, `value`, `baseline` (the mean),
+`deviation`, `score`, `threshold`, `sustained` (intervals in a row),
+`interval`, `direction` (`up` or `down`), `min_level`, and `host` for
+`fanout`.
+
+### detect:incident
+
+Incident rules correlate alerts. They do not look at packets: every new
+alert the other rules produce (the first `alert` of a dedup window, not
+`summary` records) is recorded against two entities, its source (the
+attacker role) and its destination (the victim role), with its time, sid,
+stage (from its category, see [`stage`](#stage)), severity and
+[attribution](#attribution). An `arp_spoof` alert's source entity is the
+sender MAC. The incident rules are evaluated after each new alert and, for
+`callback`, after each new TCP connection.
+
+```
+alert ip any any -> any any (msg:"Multi-stage attack"; detect:incident; kind:multi_stage; sid:1001301; rev:1; category:incident;)
+alert ip any any -> any any (msg:"Host compromised after an exploit"; detect:incident; kind:compromised_host; sid:1001302; rev:1; category:incident;)
+alert ip any any -> any any (msg:"Exploited host connected back to the attacker"; detect:incident; kind:callback; sid:1001303; rev:1; category:incident;)
+```
+
+Protocol `ip`, addresses and ports as usual: the header filters the
+attacker (source) and victim (destination) of the incident. `severity` is
+not allowed: an incident's severity is computed.
+
+| option | kinds | default | meaning |
+|---|---|---|---|
+| `kind:K;` | all | required | `multi_stage`, `compromised_host` or `callback` |
+| `min_stages:N;` | multi_stage | 2 | distinct stages a chain needs, 2 or more |
+| `first_window:S;` | multi_stage | 86400 (24h) | seconds from a first-stage alert to the next stage |
+| `window:S;` | all | multi_stage 3600 (1h), compromised_host 86400 (24h), callback 120 | multi_stage: seconds between the other consecutive stages; compromised_host: from the exploit to the c2/exfil alert; callback: from the exploit to the connection back |
+| `from:STAGE[,STAGE...];` | all | `exploit` | the stages that compromise a victim (for multi_stage: after which it follows the victim, see below) |
+| `to:STAGE[,STAGE...];` | compromised_host | `c2,exfil` | the stages a compromised host then shows as a source |
+
+Windows are whole seconds, at most 86400: the correlator keeps 24h of
+history. The default `from` and `to` need stages named `exploit`, `c2`
+and `exfil`; with other names, give them.
+
+**kind:multi_stage.** One attacker X moves through the stages against
+one victim Y. The chain's events are X's alerts against Y, X's
+first-stage (recon) alerts against any host (a sweep before the attack:
+the victim set), and Y's own reliable alerts of later stages than `from`
+after X's first `from`-stage alert on Y ("follow the victim": once X
+exploited Y, Y's C2 traffic continues X's chain). A chain is a
+time-ordered run of those events whose stages never decrease, each
+within `first_window` of the previous one when that one is first-stage,
+otherwise within `window`. The rule fires when a chain covers at least
+`min_stages` distinct stages. Severity high for 2 stages, critical for 3
+or more. Source X, destination Y.
+
+X must be reliably attributed: the chain needs at least one reliable
+alert from X against Y, and X's spoofable alerts (a SYN scan, a flood)
+join the chain only once X has a reliable alert against Y. A spoofed
+source is never named as an attacker, but a real attacker's SYN scan
+still counts as its recon.
+
+**kind:compromised_host.** Host Y was the destination of a `from`-stage
+alert (any attribution: a victim is a victim even when the source may be
+forged) and afterwards, within `window`, the reliable source of a
+`to`-stage alert. Severity critical. Source Y, destination the exploiting
+host; one incident per (rule, Y).
+
+**kind:callback.** After a reliable `from`-stage alert X -> Y, Y opens a
+new TCP connection to X (a SYN without ACK that is not a retransmission,
+from the same handshake tracker the scan detectors use) on any port
+within `window`. Severity critical. Source Y and its port, destination X
+and the port Y connected to. Only Y -> X counts; another X -> Y
+connection is not a callback.
+
+**Output.** An incident is logged once, as a record of kind `incident`,
+when it is created. After that, a record of kind `incident_update` is
+logged only when its stage set grows or its severity rises; more alerts
+of stages it already has change nothing. Incident records bypass dedup
+and are not correlated themselves. Details:
+
+| key | value |
+|---|---|
+| `kind` | `multi_stage`, `compromised_host` or `callback` |
+| `incident_id` | `inc-` and 16 hex digits: a hash of kind, sid, and the two entities (attacker and victim, or the host and its exploiter), so the same pair always gets the same id, across updates and runs |
+| `stages`, `chain` | the stages seen, in stage order: `recon,exploit,c2` and `recon -> exploit -> c2` (a callback ends with `-> callback`) |
+| `contributing` | up to 16 of the chain's alerts as `sid@time` |
+| `contributing_total` | the number of alerts in the chain |
+| `score` | see below |
+| `attribution`, `attribution_note` | always `reliable`, and why |
+| `entity` | who, as shown in the dashboard |
+| `attacker`, `victim` | multi_stage and callback |
+| `host`, `exploited_by`, `exploited_by_attribution` | compromised_host |
+| `callback`, `exploit_sid`, `delay` | callback: the connection, the exploit alert and the time between them |
+
+<a id="score"></a>**Score.** Distinct stages times the sum of severity
+weights (low 1, medium 2, high 3, critical 4) of the alerts involved: the
+victim's alerts (as destination) in the last 24h, spoofable ones
+included, plus the chain's alerts not already counted (the attacker's
+recon against other hosts, the victim's own alerts). For a callback the
+callback counts as one more stage. A port scan (medium) and a Log4Shell
+request (critical) against one host score 2 × (2 + 4) = 12; the score ranks incidents
+of the same severity in the dashboard and nothing else.
+
+**Limits.** At most 64 alerts per entity (the oldest repeat of a sid and
+stage goes first), at most 10,000 entities (least recently active evicted
+first, fewer if `-max-keys` is lower), and an entity or incident not seen
+for 24h of packet time is dropped. The periodic stats record reports them
+as the `incident_entities` and `incidents` tables.
+
+<a id="attribution"></a>**Attribution.** Every alert has
+`Details["attribution"]`: `reliable` when its source address (or MAC)
+really sent the traffic (a completed TCP handshake, the application or
+stream layer, a beacon), `spoofable` when anyone could have forged it
+(UDP, ICMP, SYNs of handshakes that never completed). The full table is
+in [ARCHITECTURE.md](ARCHITECTURE.md#attribution).
+
+Query incidents with `ids query -kind incident` or `-kind
+incident_update`.
+
 ### DoH and DoT
 
 DNS over HTTPS and over TLS bypass the local resolver, and with it any
@@ -944,11 +1388,16 @@ Detector rules cannot use `flags`, `content`, `app_*`, `stream_anomaly`,
    (per (sid, address, port) for `host_sweep`, per (sid, address, MAC)
    for `arp_spoof` `unsolicited_reply`, per (sid, MAC) for
    `multi_ip`, per (sid, client, server) for `icmp_tunnel` and
-   `dns_tunnel`, and per (sid, client) for `dns_spoof`) with
+   `dns_tunnel`, per (sid, client) for `dns_spoof`, per (sid, source,
+   destination, port) for `beacon`, and per (sid, host, metric) for
+   `baseline`) with
    count 1. The address is the tracked one for `detection_filter` and
    `detect` rules, otherwise the packet's source. Later firings within 60 s
    of the first are folded into one `summary`, logged when the window
    closes, whose count is the total.
+4. The alert (not a summary) is passed to the
+   [incident rules](#detectincident), which may log `incident` and
+   `incident_update` records.
 
 The engine clock is packet time, never the wall clock, so replaying a pcap
 gives the same alerts every time.

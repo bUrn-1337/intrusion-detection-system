@@ -1,0 +1,23 @@
+{
+  "description": "A SYN scan and nothing else: a port scan alert, no incident.",
+  "alerts": [
+    {
+      "sid": 1000401,
+      "kind": "alert",
+      "src_ip": "203.0.113.9",
+      "dst_ip": "10.0.0.80"
+    },
+    {
+      "sid": 1000401,
+      "kind": "summary",
+      "src_ip": "203.0.113.9",
+      "dst_ip": "10.0.0.80"
+    }
+  ],
+  "allow_extra": false,
+  "strict_sids": [
+    1001301,
+    1001302,
+    1001303
+  ]
+}

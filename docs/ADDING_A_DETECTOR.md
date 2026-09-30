@@ -1,8 +1,8 @@
 # Adding a detector
 
 A detector is a stateful check that a single-packet rule cannot express,
-switched on with `detect:NAME;` in a rule. There are fifteen so far, in
-nine shapes; copy the one closer to yours:
+switched on with `detect:NAME;` in a rule. There are seventeen so far, in
+eleven shapes; copy the one closer to yours:
 
 - `syn_flood` ([synflood.go](../internal/rules/synflood.go)) counts
   events per key in a sliding window: "N incomplete handshakes within S
@@ -47,6 +47,22 @@ nine shapes; copy the one closer to yours:
   per-value entropy or a caller bit), or response and query bytes
   (`rateCounter`). Grouping by domain uses the registered domain
   (eTLD+1 from the Public Suffix List), never "the last two labels".
+- `beacon` ([beacon.go](../internal/rules/beacon.go)) keeps a ring of
+  the last 32 connection-start times per (source, destination, port,
+  protocol) in its own LRU table, and judges the intervals on each new
+  start. What counts as a start needs memory of its own: two
+  `recentSet`s, one of recent SYNs (to skip retransmissions) and one of
+  recent UDP flows (to skip packets inside a flow).
+- `baseline` ([baseline.go](../internal/rules/baseline.go)) learns what
+  is normal instead of taking a threshold: per metric, an EWMA of the
+  value and of its absolute deviation, updated when a fixed interval of
+  packet time closes (on the first packet after it). Distinct addresses
+  are counted in fixed bitmaps, and per-host state lives in its own LRU
+  table. It is ticked on every packet before the whitelist, since time
+  passes whatever the packet, and counts only the packets that get past
+  it. A learning detector also has to say when it is ready: it queues
+  `Notice`s that the IDS logs as events, and publishes a status for the
+  dashboard.
 
 The example new detector here is `conn_burst` (a made-up name: many
 connections from one source); replace it with yours.
@@ -216,6 +232,21 @@ Include `detector`, `track` and `tracked_addr`, plus the numbers that
 justify the alert so an analyst can judge it without the pcap. Keys are
 part of the log format: keep them stable, and never put payload bytes in
 them.
+
+**Attribution.** `emit` adds `attribution` itself, from `reliable()` in
+[attribution.go](../internal/rules/attribution.go). Decide whether your
+detector's source address is proven: it is when the source completed a
+TCP handshake (or the alert comes from the stream or application layer);
+it is not when the alert rests on SYNs, UDP or ICMP packets, which anyone
+can forge. An unlisted detector is spoofable, which is the safe default:
+its alerts still add to the victim's side of an incident but never name
+an attacker. If yours is reliable (always, or on TCP only), add a case to
+`reliable()`, add a row to the table in
+[ARCHITECTURE.md](ARCHITECTURE.md#attribution), and extend
+`TestAttributionClasses`. Give the rule a `category` that a `stage`
+directive maps if its alerts should count as a kill-chain stage (see
+[RULES.md](RULES.md#stage)); a new category must be added to
+`standardCategories` in stage.go, or it is only known when a rule uses it.
 
 ## 6. Unit tests
 

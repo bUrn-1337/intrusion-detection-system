@@ -15,6 +15,7 @@ import (
 const (
 	KindAlert   = "alert"
 	KindSummary = "summary"
+	// KindIncident and KindIncidentUpdate are in correlate.go.
 )
 
 // Alert is one alert or dedup summary. Module 6 writes it as JSON Lines.
@@ -72,33 +73,38 @@ const (
 
 // Table names in EngineStats.Tables.
 const (
-	TableDedup           = "dedup"
-	TableHandshake       = "handshake"
-	TableDetectionFilter = "detection_filter"
-	TableSYNFlood        = "syn_flood"
-	TablePortScan        = "port_scan"
-	TableHostSweep       = "host_sweep"
-	TablePingSweep       = "ping_sweep"
-	TableTTLAnomaly      = "ttl_anomaly"
-	TableFragments       = "fragments"
-	TableFragFlood       = "frag_flood"
-	TableTTLFlows        = "ttl_flows"
-	TableARPBindings     = "arp_bindings"
-	TableARPRequests     = "arp_requests"
-	TableARPSpoof        = "arp_spoof"
-	TableUDPFlood        = "udp_flood"
-	TableUDPFlows        = "udp_flows"
-	TableICMPFlood       = "icmp_flood"
-	TableICMPPeers       = "icmp_peers"
-	TableEchoRequests    = "echo_requests"
-	TableICMPTunnel      = "icmp_tunnel"
-	TableSlowFlows       = "slow_flows"
-	TableSlowloris       = "slowloris"
-	TableDNSQueries      = "dns_queries"
-	TableDNSSpoof        = "dns_spoof"
-	TableDNSAmp          = "dns_amplification"
-	TableDNSTunnel       = "dns_tunnel"
-	TableNXDomain        = "dns_nxdomain"
+	TableDedup            = "dedup"
+	TableHandshake        = "handshake"
+	TableDetectionFilter  = "detection_filter"
+	TableSYNFlood         = "syn_flood"
+	TablePortScan         = "port_scan"
+	TableHostSweep        = "host_sweep"
+	TablePingSweep        = "ping_sweep"
+	TableTTLAnomaly       = "ttl_anomaly"
+	TableFragments        = "fragments"
+	TableFragFlood        = "frag_flood"
+	TableTCPFlows         = "tcp_flows"
+	TableARPBindings      = "arp_bindings"
+	TableARPRequests      = "arp_requests"
+	TableARPSpoof         = "arp_spoof"
+	TableUDPFlood         = "udp_flood"
+	TableUDPFlows         = "udp_flows"
+	TableICMPFlood        = "icmp_flood"
+	TableICMPPeers        = "icmp_peers"
+	TableEchoRequests     = "echo_requests"
+	TableICMPTunnel       = "icmp_tunnel"
+	TableSlowFlows        = "slow_flows"
+	TableSlowloris        = "slowloris"
+	TableDNSQueries       = "dns_queries"
+	TableDNSSpoof         = "dns_spoof"
+	TableDNSAmp           = "dns_amplification"
+	TableDNSTunnel        = "dns_tunnel"
+	TableNXDomain         = "dns_nxdomain"
+	TableBeacon           = "beacon"
+	TableBeaconConns      = "beacon_conns"
+	TableBaselineHosts    = "baseline_hosts"
+	TableIncidentEntities = "incident_entities"
+	TableIncidents        = "incidents"
 )
 
 // EngineStats is a snapshot of engine counters.
@@ -106,6 +112,7 @@ type EngineStats struct {
 	Packets     uint64 // packets passed to Process
 	Alerts      uint64 // Kind "alert" alerts emitted
 	Summaries   uint64 // Kind "summary" alerts emitted
+	Incidents   uint64 // Kind "incident" and "incident_update" alerts emitted
 	Suppressed  uint64 // matches folded into a dedup window instead of alerting
 	Passed      uint64 // packets that matched a pass rule
 	Whitelisted uint64 // packets from a whitelisted source
@@ -117,6 +124,21 @@ type EngineStats struct {
 	// the tracker stores per datagram; they are no longer checked.
 	FragmentsOverLimit uint64
 	Tables             map[string]TableStats
+	// Feeds describes the threat-intel feeds of the latest loaded rule
+	// set, in file order.
+	Feeds []FeedStats
+}
+
+// FeedStats describes one loaded feed. Its age is computed by the caller
+// against wall time: the engine clock is packet time.
+type FeedStats struct {
+	Name     string
+	Type     string
+	Path     string
+	Entries  int
+	Rejected int
+	ModTime  time.Time
+	MaxAge   time.Duration // 0: never stale
 }
 
 // TableStats describes one kind of table. For per-rule tables the numbers
@@ -156,18 +178,21 @@ type Engine struct {
 	frags         *fragmentTracker
 	fragBuf       []fragEvent
 	fragOverLimit atomic.Uint64
-	flows         *flowSet // completed TCP flows, for ttl_anomaly
+	flows         *flowSet // completed TCP flows, for attribution and ttl_anomaly
+	corr          *correlator
 	arpTable      *arpTable
 	arpReqs       *arpRequests
 	echoReqs      *recentSet[echoKey] // outstanding echo requests, for icmp_flood kind:unsolicited_reply
 	slow          *slowTable          // HTTP flows that may be slow, for slowloris
 	dnsQueries    *dnsQueries         // outstanding DNS queries, for dns_spoof and dns_amplification
 	dnsBuf        []dnsMsg
+	notices       []Notice                 // for TakeNotices
+	baselineShown atomic.Pointer[baseline] // the first baseline rule's detector, for BaselineStatus
 
-	packets, alerts, summaries, suppressed, passed, whitelisted atomic.Uint64
-	reloads, reloadFails                                        atomic.Uint64
-	nRules                                                      atomic.Int64
-	tables                                                      [numTables]tableStat
+	packets, alerts, summaries, incidents, suppressed, passed, whitelisted atomic.Uint64
+	reloads, reloadFails                                                   atomic.Uint64
+	nRules                                                                 atomic.Int64
+	tables                                                                 [numTables]tableStat
 }
 
 const (
@@ -181,7 +206,7 @@ const (
 	tTTL
 	tFrags
 	tFragFlood
-	tTTLFlows
+	tTCPFlows
 	tARPBindings
 	tARPRequests
 	tARPSpoof
@@ -198,13 +223,19 @@ const (
 	tDNSAmp
 	tDNSTunnel
 	tNXDomain
+	tBeacon
+	tBeaconConns
+	tBaselineHosts
+	tIncEntities
+	tIncidents
 	numTables
 )
 
 var tableNames = [numTables]string{TableDedup, TableHandshake, TableDetectionFilter, TableSYNFlood, TablePortScan, TableHostSweep, TablePingSweep,
-	TableTTLAnomaly, TableFragments, TableFragFlood, TableTTLFlows, TableARPBindings, TableARPRequests, TableARPSpoof,
+	TableTTLAnomaly, TableFragments, TableFragFlood, TableTCPFlows, TableARPBindings, TableARPRequests, TableARPSpoof,
 	TableUDPFlood, TableUDPFlows, TableICMPFlood, TableICMPPeers, TableEchoRequests, TableICMPTunnel, TableSlowFlows, TableSlowloris,
-	TableDNSQueries, TableDNSSpoof, TableDNSAmp, TableDNSTunnel, TableNXDomain}
+	TableDNSQueries, TableDNSSpoof, TableDNSAmp, TableDNSTunnel, TableNXDomain,
+	TableBeacon, TableBeaconConns, TableBaselineHosts, TableIncidentEntities, TableIncidents}
 
 // scanTables maps a scan detector to its table.
 var scanTables = map[string]int{DetectPortScan: tPortScan, DetectHostSweep: tHostSweep, DetectPingSweep: tPingSweep}
@@ -226,6 +257,8 @@ type ruleState struct {
 	amp    *dnsAmp
 	dnsTun *dnsTunnel
 	nx     *nxBurst
+	beacon *beacon
+	base   *baseline
 }
 
 // NewEngine returns an engine using rs.
@@ -249,7 +282,8 @@ func NewEngine(rs *RuleSet, cfg EngineConfig) *Engine {
 	e.dedup = newDeduper(cfg.DedupWindow, cfg.MaxKeys, &e.tables[tDedup])
 	e.hs = newHandshakeTracker(cfg.HandshakeTimeout, cfg.MaxKeys, &e.tables[tHandshake])
 	e.frags = newFragmentTracker(cfg.FragmentTimeout, cfg.MaxKeys, &e.tables[tFrags])
-	e.flows = newFlowSet(cfg.MaxKeys, &e.tables[tTTLFlows])
+	e.flows = newFlowSet(cfg.MaxKeys, &e.tables[tTCPFlows])
+	e.corr = newCorrelator(cfg.MaxKeys, &e.tables[tIncEntities], &e.tables[tIncidents])
 	e.arpTable = newARPTable(cfg.MaxKeys, &e.tables[tARPBindings])
 	e.arpReqs = newARPRequests(cfg.MaxKeys, &e.tables[tARPRequests])
 	e.echoReqs = newRecentSet[echoKey](echoRequestIdle, cfg.MaxKeys, &e.tables[tEchoRequests])
@@ -278,6 +312,12 @@ func (e *Engine) Reload(path string) error {
 	e.nRules.Store(int64(rs.Len()))
 	e.reloads.Add(1)
 	return nil
+}
+
+// Warnings returns the load warnings of the latest loaded rule set (feed
+// lines that were rejected, empty feeds).
+func (e *Engine) Warnings() []string {
+	return e.next.Load().Warnings()
 }
 
 // activate switches Process to rs, carrying over the state of unchanged
@@ -330,6 +370,12 @@ func (e *Engine) activate(rs *RuleSet) {
 			if st.nx != nil {
 				st.nx.rule = r
 			}
+			if st.beacon != nil {
+				st.beacon.rule = r
+			}
+			if st.base != nil {
+				st.base.rule = r
+			}
 			continue
 		}
 		st := &ruleState{text: r.text}
@@ -363,6 +409,10 @@ func (e *Engine) activate(rs *RuleSet) {
 			st.dnsTun = newDNSTunnel(r, e.cfg.MaxKeys, &e.tables[tDNSTunnel])
 		case DetectNXDomainBurst:
 			st.nx = newNXBurst(r, e.cfg.MaxKeys, &e.tables[tNXDomain])
+		case DetectBeacon:
+			st.beacon = newBeacon(r, e.cfg.MaxKeys, &e.tables[tBeacon], &e.tables[tBeaconConns])
+		case DetectBaseline:
+			st.base = newBaseline(r, e.cfg.MaxKeys, &e.tables[tBaselineHosts])
 		}
 		states[i] = st
 	}
@@ -406,16 +456,28 @@ func (e *Engine) activate(rs *RuleSet) {
 		if st.nx != nil {
 			st.nx.clear()
 		}
+		if st.beacon != nil {
+			st.beacon.clear()
+		}
+		if st.base != nil {
+			st.base.clear()
+		}
 	}
+	var shown *baseline
+	if len(rs.baseline) > 0 {
+		shown = states[rs.baseline[0].idx].base
+	}
+	e.baselineShown.Store(shown)
 	if !rs.handshakes {
 		e.hs.clear()
 	}
 	if len(rs.frags) == 0 {
 		e.frags.clear()
 	}
-	if len(rs.ttl) == 0 {
+	if !rs.handshakes {
 		e.flows.clear()
 	}
+	e.corr.use(rs)
 	if len(rs.arp) == 0 {
 		e.arpTable.clear()
 		e.arpReqs.clear()
@@ -456,6 +518,13 @@ func (e *Engine) Process(p *packet.ParsedPacket) []Alert {
 			e.hsBuf = e.hs.observe(&seg, now, e.hsBuf)
 		}
 		out = e.handshakeEvents(rs, e.hsBuf, out)
+		if v.g == gTCP {
+			v.established = e.flows.touch(hsKey{client: v.src, cport: v.sport, server: v.dst, sport: v.dport}, now) ||
+				e.flows.touch(hsKey{client: v.dst, cport: v.dport, server: v.src, sport: v.sport}, now)
+			if rs.callback && e.hs.started && !e.isWhitelisted(v.src) && !e.passes(rs, &v) {
+				out = e.corr.connStart(rs, v.src, v.dst, v.sport, v.dport, now, out)
+			}
+		}
 	}
 	if rs.probes {
 		if pr, ok := packetProbe(p, &v, now); ok {
@@ -481,6 +550,10 @@ func (e *Engine) Process(p *packet.ParsedPacket) []Alert {
 		out = e.dns(rs, p, &v, out)
 	}
 
+	if len(rs.baseline) > 0 {
+		out = e.baselineTick(rs, out)
+	}
+
 	switch {
 	case v.g == gNone:
 	case e.isWhitelisted(v.src):
@@ -493,6 +566,12 @@ func (e *Engine) Process(p *packet.ParsedPacket) []Alert {
 			for _, r := range rs.ttl {
 				out = e.ttlAnomaly(r, p, &v, mode, hk, out)
 			}
+		}
+		if len(rs.beacon) > 0 && (v.g == gTCP || v.g == gUDP) {
+			out = e.beacons(rs, p, &v, out)
+		}
+		if len(rs.baseline) > 0 {
+			e.baselineCount(rs, p, &v)
 		}
 		for _, r := range rs.groups[v.g].alert {
 			if r.match(&v) {
@@ -542,9 +621,12 @@ func (e *Engine) Flush() []Alert {
 
 func (e *Engine) count(out []Alert) {
 	for i := range out {
-		if out[i].Kind == KindSummary {
+		switch out[i].Kind {
+		case KindSummary:
 			e.summaries.Add(1)
-		} else {
+		case KindIncident, KindIncidentUpdate:
+			e.incidents.Add(1)
+		default:
 			e.alerts.Add(1)
 		}
 	}
@@ -577,6 +659,9 @@ func (e *Engine) passes(rs *RuleSet, v *view) bool {
 func (e *Engine) handshakeEvents(rs *RuleSet, evs []hsEvent, out []Alert) []Alert {
 	for i := range evs {
 		ev := &evs[i]
+		if ev.complete {
+			e.flows.add(ev.key, ev.t)
+		}
 		if len(rs.ttl) > 0 {
 			out = e.ttlHandshake(rs, ev, out)
 		}
@@ -678,9 +763,6 @@ func (e *Engine) ttlAnomaly(r *Rule, p *packet.ParsedPacket, v *view, mode ttlMo
 // if it completed or counted at the outcome time if not. Held anomalies
 // already passed the whitelist, pass rules and the rule's addresses.
 func (e *Engine) ttlHandshake(rs *RuleSet, ev *hsEvent, out []Alert) []Alert {
-	if ev.complete {
-		e.flows.add(ev.key, ev.t)
-	}
 	for _, r := range rs.ttl {
 		d := e.ruleState[r.idx].ttl
 		for _, h := range d.resolve(ev) {
@@ -925,6 +1007,7 @@ func (e *Engine) icmp(rs *RuleSet, p *packet.ParsedPacket, v *view, out []Alert)
 // matched handles a per-packet rule match: detection_filter, then dedup.
 func (e *Engine) matched(r *Rule, v *view, out []Alert) []Alert {
 	key := v.src
+	dk := dedupKey{sid: r.SID}
 	var details func() map[string]string
 	if f := r.filter; f != nil {
 		if f.track == TrackByDst {
@@ -935,15 +1018,26 @@ func (e *Engine) matched(r *Rule, v *view, out []Alert) []Alert {
 			return out
 		}
 		details = func() map[string]string {
-			return map[string]string{
+			return r.feedDetails(v, map[string]string{
 				"track":        f.track.String(),
 				"tracked_addr": key.String(),
 				"count":        strconv.Itoa(ent.size()),
 				"seconds":      strconv.Itoa(f.seconds),
-			}
+			})
+		}
+	} else if r.ipFeed != nil || r.domainFeed != nil || r.ja3Feed != nil {
+		details = func() map[string]string { return r.feedDetails(v, nil) }
+	}
+	dk.addr = key
+	if r.ipFeed != nil && r.filter == nil {
+		// One alert per indicator and peer: a listed server contacted by
+		// two hosts, or by one host on two ports, is one alert per host.
+		dk.addr, dk.peer = v.src, v.dst
+		if !r.ipFeed.ContainsIP(v.src) {
+			dk.addr, dk.peer = v.dst, v.src
 		}
 	}
-	return e.emit(r, dedupKey{sid: r.SID, addr: key}, v, details, out)
+	return e.emit(r, dk, v, details, out)
 }
 
 // emit passes a firing rule through dedup.
@@ -958,10 +1052,19 @@ func (e *Engine) emit(r *Rule, key dedupKey, v *view, details func() map[string]
 		if details != nil {
 			a.Details = details()
 		}
+		if a.Details == nil {
+			a.Details = make(map[string]string, 1)
+		}
+		a.Details[detailAttribution] = attribution(r, v)
 		return a
 	}, out)
 	if !isNew {
 		e.suppressed.Add(1)
+		return out
+	}
+	if len(e.active.incident) > 0 {
+		a := out[len(out)-1]
+		out = e.corr.alert(e.active, r, v, &a, e.now, out)
 	}
 	return out
 }
@@ -980,6 +1083,7 @@ func (e *Engine) Stats() EngineStats {
 		Packets:            e.packets.Load(),
 		Alerts:             e.alerts.Load(),
 		Summaries:          e.summaries.Load(),
+		Incidents:          e.incidents.Load(),
 		Suppressed:         e.suppressed.Load(),
 		Passed:             e.passed.Load(),
 		Whitelisted:        e.whitelisted.Load(),
@@ -988,6 +1092,10 @@ func (e *Engine) Stats() EngineStats {
 		ReloadFails:        e.reloadFails.Load(),
 		FragmentsOverLimit: e.fragOverLimit.Load(),
 		Tables:             make(map[string]TableStats, numTables),
+	}
+	for _, f := range e.next.Load().Feeds() {
+		s.Feeds = append(s.Feeds, FeedStats{Name: f.Name, Type: f.Type.String(), Path: f.Path,
+			Entries: f.Entries, Rejected: f.Rejected, ModTime: f.ModTime, MaxAge: f.MaxAge})
 	}
 	for i := range e.tables {
 		ts := TableStats{Keys: e.tables[i].keys.Load(), Evictions: e.tables[i].evictions.Load()}

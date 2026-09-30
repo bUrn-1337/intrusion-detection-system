@@ -565,6 +565,12 @@ func TestParse(t *testing.T) {
 					}
 				}
 			}
+			if _, ok := tt.want["ja3_hash"]; !ok && !tt.partial {
+				// Every ClientHello case gets a JA3; ja3_test.go checks it.
+				got = maps.Clone(got)
+				delete(got, "ja3")
+				delete(got, "ja3_hash")
+			}
 			if len(got) != 0 || len(tt.want) != 0 {
 				if !maps.Equal(got, tt.want) {
 					t.Errorf("AppFields mismatch\n got: %v\nwant: %v", got, tt.want)

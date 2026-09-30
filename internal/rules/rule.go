@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bUrn-1337/intrusion-detection-system/internal/intel"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
 )
 
@@ -83,6 +84,17 @@ const (
 	DetectDNSAmplification = "dns_amplification"
 	DetectDNSTunnel        = "dns_tunnel"
 	DetectNXDomainBurst    = "dns_nxdomain_burst"
+	DetectBeacon           = "beacon"
+	DetectBaseline         = "baseline"
+	// DetectIncident rules correlate alerts into incidents (correlate.go).
+	DetectIncident = "incident"
+)
+
+// Values of the incident kind option.
+const (
+	IncidentMultiStage      = "multi_stage"
+	IncidentCompromisedHost = "compromised_host"
+	IncidentCallback        = "callback"
 )
 
 // Values of the dns_spoof kind option.
@@ -162,6 +174,13 @@ type Rule struct {
 	fieldRegex  []fieldRegex     // regex on AppFields keys
 	dataRegex   []*regexp.Regexp // regex:data
 
+	// Threat-intel feeds (internal/intel).
+	ipFeed     *intel.Feed // ip_feed: the source or destination is in it
+	domainFeed *intel.Feed // domain_feed: one of domainKeys is in it
+	domainKeys []string
+	ja3Feed    *intel.Feed // ja3_feed: ja3_hash is in it
+	ja3Label   uint8       // ja3Labeled, ja3Unlabeled, or 0 for either
+
 	filter *windowSpec // detection_filter, or nil
 
 	// Detector parameters (Detect != ""). The scan detectors use only
@@ -199,7 +218,7 @@ type Rule struct {
 	// dns_tunnel and dns_nxdomain_burst
 	minEntropy float64
 	minLength  int      // dns_tunnel kind:subdomains
-	allow      []string // dns_tunnel: registered domains never counted
+	allow      []string // dns_tunnel and beacon: domains never counted
 
 	// slowloris; detect.seconds is the activity window of slow_headers
 	// and slow_body.
@@ -207,7 +226,46 @@ type Rule struct {
 	minAge       time.Duration
 	minRate      int // slow_body: bytes per second
 	minRemaining int // slow_body: bytes of declared body still to come
+
+	// beacon; allow holds the allowed names.
+	minEvents                int
+	persistence              int // checks in a row that must pass
+	minInterval, maxInterval time.Duration
+	jitter, minFraction      float64
+	allowPorts               portSpec
+	allowAddrs               addrSpec
+	hasAllowAddrs            bool
+
+	// baseline
+	interval       time.Duration
+	learnIntervals int
+	threshold      float64
+	sustain        int
+	maxStep        float64
+	metrics        metricSet
+	drop           metricSet // metrics that also fire when they fall
+	minLevel       [numMetrics]float64
+	// incident
+	incKind     string
+	minStages   int
+	incWindow   time.Duration // multi_stage: between stages after the first; else from the exploit
+	firstWindow time.Duration // multi_stage: from a first-stage alert to the next
+	fromStages  stageSet
+	toStages    stageSet
+	// stage is the kill-chain stage of Category, -1 for none. Parse sets
+	// it from the stage directives.
+	stage int
 }
+
+// Values of Rule.ja3Label.
+const (
+	ja3Labeled uint8 = iota + 1
+	ja3Unlabeled
+)
+
+// defaultDomainKeys are the AppFields domain_feed checks without a KEY:
+// the DNS query name, the TLS server name and the HTTP Host.
+var defaultDomainKeys = []string{"qname", "sni", "host"}
 
 // Values of Rule.ethDst.
 const (
@@ -322,14 +380,16 @@ type RuleSet struct {
 	// must run.
 	handshakes bool
 	// probes is true when some scan detector consumes per-packet probes.
-	probes bool
-	ttl    []*Rule // detect:ttl_anomaly rules
-	frags  []*Rule // detect:frag_attack rules; the fragment tracker runs when non-empty
-	arp    []*Rule // detect:arp_spoof rules; the ARP tables run when non-empty
-	udp    []*Rule // detect:udp_flood rules
-	icmp   []*Rule // detect:icmp_flood and icmp_tunnel rules
-	slow   []*Rule // detect:slowloris rules; the slow flow table runs when non-empty
-	dns    []*Rule // the DNS detectors (dns.go)
+	probes   bool
+	ttl      []*Rule // detect:ttl_anomaly rules
+	frags    []*Rule // detect:frag_attack rules; the fragment tracker runs when non-empty
+	arp      []*Rule // detect:arp_spoof rules; the ARP tables run when non-empty
+	udp      []*Rule // detect:udp_flood rules
+	icmp     []*Rule // detect:icmp_flood and icmp_tunnel rules
+	slow     []*Rule // detect:slowloris rules; the slow flow table runs when non-empty
+	dns      []*Rule // the DNS detectors (dns.go)
+	beacon   []*Rule // detect:beacon rules
+	baseline []*Rule // detect:baseline rules
 	// dnsQueries is true when some dns_spoof or dns_amplification rule
 	// needs the outstanding query table.
 	dnsQueries bool
@@ -338,6 +398,14 @@ type RuleSet struct {
 	echoReqs bool
 	// arpStatic holds the arpbind directives: IPv4 address -> MAC.
 	arpStatic map[netip.Addr]mac6
+	// stages holds the stage directives; incident holds the
+	// detect:incident rules, and callback is true when one of them has
+	// kind:callback, so connection starts are reported.
+	stages   *stageTable
+	incident []*Rule
+	callback bool
+	feeds    []*intel.Feed // feed directives, in file order
+	warnings []string
 }
 
 type ruleGroup struct{ pass, alert []*Rule }
@@ -350,6 +418,14 @@ func (rs *RuleSet) Len() int { return len(rs.rules) }
 
 // File returns the path the rules were loaded from.
 func (rs *RuleSet) File() string { return rs.file }
+
+// Feeds returns the feeds the rule file defines, in file order. The
+// caller must not modify them.
+func (rs *RuleSet) Feeds() []*intel.Feed { return rs.feeds }
+
+// Warnings returns problems that did not stop the rules from loading,
+// such as rejected feed entries.
+func (rs *RuleSet) Warnings() []string { return rs.warnings }
 
 // group is the kind of packet as far as rule selection is concerned.
 type group uint8
@@ -383,7 +459,11 @@ func groupsFor(p Proto) []group {
 }
 
 func newRuleSet(file string, rules []*Rule, static map[netip.Addr]mac6) *RuleSet {
-	rs := &RuleSet{file: file, rules: rules, arpStatic: static}
+	rs := &RuleSet{file: file, rules: rules, arpStatic: static, stages: newStageTable()}
+	// The handshake tracker also tells alerts on completed flows apart
+	// (attribution, see attribution.go), so it runs whenever there are
+	// rules.
+	rs.handshakes = len(rules) > 0
 	for i, r := range rules {
 		r.idx = i
 		if r.Detect != "" {
@@ -412,6 +492,15 @@ func newRuleSet(file string, rules []*Rule, static map[netip.Addr]mac6) *RuleSet
 				}
 			case DetectSlowloris:
 				rs.slow = append(rs.slow, r)
+			case DetectBeacon:
+				rs.beacon = append(rs.beacon, r)
+			case DetectBaseline:
+				rs.baseline = append(rs.baseline, r)
+			case DetectIncident:
+				rs.incident = append(rs.incident, r)
+				if r.incKind == IncidentCallback {
+					rs.callback = true
+				}
 			case DetectDNSSpoof, DetectDNSAmplification, DetectDNSTunnel, DetectNXDomainBurst:
 				rs.dns = append(rs.dns, r)
 				if r.Detect == DetectDNSSpoof || r.Detect == DetectDNSAmplification {
@@ -446,6 +535,10 @@ type view struct {
 
 	appLower     []byte // lowercased p.AppData
 	haveAppLower bool
+
+	// established is true for a TCP packet of a flow whose handshake
+	// the tracker saw complete (for attribution).
+	established bool
 }
 
 func (v *view) init(p *packet.ParsedPacket) {
@@ -543,6 +636,9 @@ func (r *Rule) match(v *view) bool {
 	if !r.matchAddrs(v) {
 		return false
 	}
+	if r.ipFeed != nil && !r.ipFeed.ContainsIP(v.src) && !r.ipFeed.ContainsIP(v.dst) {
+		return false
+	}
 	if r.sameIP && v.src != v.dst {
 		return false
 	}
@@ -615,7 +711,8 @@ func (r *Rule) match(v *view) bool {
 // perMessage reports whether r has options checked against the fields
 // of one application message.
 func (r *Rule) perMessage() bool {
-	return len(r.appFields) > 0 || len(r.appReasons) > 0 || len(r.appContents) > 0 || len(r.appDomains) > 0 || len(r.fieldRegex) > 0
+	return len(r.appFields) > 0 || len(r.appReasons) > 0 || len(r.appContents) > 0 || len(r.appDomains) > 0 || len(r.fieldRegex) > 0 ||
+		r.domainFeed != nil || r.ja3Feed != nil
 }
 
 func (r *Rule) matchApp(fields map[string]string) bool {
@@ -648,7 +745,114 @@ func (r *Rule) matchApp(fields map[string]string) bool {
 			return false
 		}
 	}
+	if r.domainFeed != nil {
+		if _, _, ok := r.domainHit(fields); !ok {
+			return false
+		}
+	}
+	if r.ja3Feed != nil {
+		if _, ok := r.ja3Hit(fields); !ok {
+			return false
+		}
+	}
 	return true
+}
+
+// domainHit returns the first of r.domainKeys whose value is in r's
+// domain feed, and the feed entry it matched. A DNS qname counts in
+// queries only: the response repeats it, and would be a second alert
+// for the same lookup that names the resolver as its source.
+func (r *Rule) domainHit(fields map[string]string) (key, entry string, ok bool) {
+	for _, k := range r.domainKeys {
+		name, found := fields[k]
+		if !found {
+			continue
+		}
+		switch k {
+		case "host":
+			name = stripPort(name)
+		case "qname":
+			if fields["is_response"] == "true" {
+				continue
+			}
+		}
+		if entry, ok := r.domainFeed.MatchDomain(name); ok {
+			return k, entry, true
+		}
+	}
+	return "", "", false
+}
+
+// stripPort removes a ":port" suffix from an HTTP Host value.
+func stripPort(host string) string {
+	i := strings.LastIndexByte(host, ':')
+	if i < 0 || strings.Contains(host[i:], "]") {
+		return host
+	}
+	for j := i + 1; j < len(host); j++ {
+		if host[j] < '0' || host[j] > '9' {
+			return host
+		}
+	}
+	return host[:i]
+}
+
+// ja3Hit returns the feed label of the message's ja3_hash, if the hash is
+// in r's JA3 feed with the label kind r asks for.
+func (r *Rule) ja3Hit(fields map[string]string) (string, bool) {
+	label, ok := r.ja3Feed.LookupJA3(fields["ja3_hash"])
+	switch {
+	case !ok:
+		return "", false
+	case r.ja3Label == ja3Labeled && label == "", r.ja3Label == ja3Unlabeled && label != "":
+		return "", false
+	}
+	return label, true
+}
+
+// feedDetails describes the feed entries a matching packet hit, for the
+// alert: which side of the packet is in an ip feed, and which field and
+// entry matched a domain or JA3 feed in the first message that matched.
+func (r *Rule) feedDetails(v *view, d map[string]string) map[string]string {
+	if r.ipFeed == nil && r.domainFeed == nil && r.ja3Feed == nil {
+		return d
+	}
+	if d == nil {
+		d = make(map[string]string)
+	}
+	if f := r.ipFeed; f != nil {
+		src, dst := f.ContainsIP(v.src), f.ContainsIP(v.dst)
+		d["ip_feed"] = f.Name
+		switch {
+		case src && dst:
+			d["side"], d["indicator"] = "both", v.src.String()+","+v.dst.String()
+		case src:
+			d["side"], d["indicator"] = "src", v.src.String()
+		default:
+			d["side"], d["indicator"] = "dst", v.dst.String()
+		}
+	}
+	if (r.domainFeed != nil || r.ja3Feed != nil) && v.p != nil {
+		msgs := append([]map[string]string{v.p.AppFields}, v.p.AppMore...)
+		for _, m := range msgs {
+			if !r.matchApp(m) {
+				continue
+			}
+			if r.domainFeed != nil {
+				key, entry, _ := r.domainHit(m)
+				d["domain_feed"], d["field"], d["name"], d["indicator"] = r.domainFeed.Name, key, m[key], entry
+			}
+			if r.ja3Feed != nil {
+				label, _ := r.ja3Hit(m)
+				d["ja3_feed"], d["ja3_hash"] = r.ja3Feed.Name, strings.ToLower(m["ja3_hash"])
+				if label != "" {
+					d["label"] = label
+				}
+			}
+			break
+		}
+	}
+	return d
 }
 
 // inDomains reports whether name, compared without case and a trailing

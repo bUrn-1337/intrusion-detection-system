@@ -1,0 +1,7 @@
+{
+  "description": "10.0.0.5 polls poll.example.net (203.0.113.77:443) over HTTPS every 60s, 15 times; a neighbour loads two pages. The beacon rule fires once, at the 10th connection (min_events), naming the SNI; later polls are the same periodic key and do not alert again.",
+  "alerts": [
+    {"sid": 1001101, "kind": "alert", "src_ip": "10.0.0.5", "dst_ip": "203.0.113.77", "dst_port": 443, "count": [1, 1],
+     "details": {"detector": "beacon", "median": "1m0s", "fraction": "1.00", "count": "32", "name": "poll.example.net"}}
+  ]
+}

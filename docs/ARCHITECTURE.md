@@ -14,6 +14,7 @@
    file: wait                stream.Process  TCP reassembly on app ports
                              app.Parse     HTTP, DNS, FTP, TLS ClientHello
                              engine.Process  rules, handshakes, dedup
+                               |   correlate    alerts -> incidents
                                |
                                +--> alerts --> [chan] --> JSON Lines log (rotating)
                                +--> alerts --> dashboard (or stdout with -no-tui)
@@ -121,11 +122,14 @@ redaction itself.
 
 **Bounded tables.** Every engine table (dedup, handshakes,
 detection_filter, syn_flood, port_scan, host_sweep, ping_sweep,
-ttl_anomaly, ttl_flows, fragments, frag_flood, arp_bindings,
+ttl_anomaly, tcp_flows, fragments, frag_flood, arp_bindings,
 arp_requests, arp_spoof, udp_flood, udp_flows, icmp_flood, icmp_peers,
-echo_requests, icmp_tunnel, slow_flows and slowloris) holds at most
-50,000 keys. At the
-cap, the least recently seen key is evicted and counted in the stats
+echo_requests, icmp_tunnel, slow_flows, slowloris, the DNS tables, beacon,
+beacon_conns, baseline_hosts, incident_entities and incidents) holds at
+most 50,000 keys (baseline_hosts and incident_entities at most 10,000,
+each baseline host with a 512-byte bitmap, each entity with up to 64
+contributions). At the cap,
+the least recently seen key is evicted and counted in the stats
 record (`evictions`), so memory stays flat under attack. An evicted
 handshake counts as incomplete, which is right for a flood. In the
 stress test (1,000,000 SYNs from distinct spoofed sources, replayed with
@@ -270,6 +274,87 @@ domain with hundreds of random subdomains (the
 `dns_cdn_many_subdomains_couk` scenario). The list includes its private
 section, so each `*.cloudfront.net` distribution is its own domain too.
 
+**Threat-intel feeds are loaded with the rules.** A `feed` line in the
+rules file names a file of indicators, read whenever the rules are, so
+refreshing a feed is the same SIGHUP as editing a rule, and a bad feed
+file keeps the old rules like a bad rule does. IP feeds are a sorted
+range table searched with a binary search; domain feeds a set checked
+for the name and each parent (`a.b.c`, `b.c`), so a lookup is a few map
+probes whatever the feed size. Private and reserved ranges are rejected
+line by line: a feed entry of `10.0.0.0/8` is always a mistake and would
+flag the whole network. `make feeds` fetches public feeds but the data is
+never committed: it changes hourly and belongs to its providers.
+
+**Beacons by median interval.** detect:beacon judges only connection
+starts, so a long-lived connection's keepalives count once, and it takes
+the median of the last 31 intervals rather than the mean: one sleep of
+the laptop or one burst of retries moves a mean anywhere, but moves the
+median by at most one position. The 2x band counts a skipped beat as
+regular, since beacons miss rounds when the network is down. A key
+alerts once per periodic streak: a 5-minute beacon would otherwise raise
+an alert on every beat, past the 60 s dedup window.
+
+**Baselines with absolute deviation.** detect:baseline scores each
+interval as (value − EWMA mean) / EWMA absolute deviation, with a
+per-metric floor. The variance, the usual choice, squares each deviation,
+so one burst dominates it for many intervals and hides the next;
+traffic volume is heavy-tailed, with bursts the rule. The absolute
+deviation grows in proportion to the burst, needs no square root and is
+in the metric's own units. Distinct destinations are counted in fixed
+bitmaps (linear counting), so a host that contacts a million addresses
+costs no more memory than one that contacts ten. An anomalous interval
+never updates the baseline, and every update is clamped to `max_step`,
+which together make it hard to teach the baseline an attack; see the
+boiling frog under Known gaps for what they cannot stop.
+
+<a id="attribution"></a>**Attribution.** An IP source address is only
+evidence when the sender had to receive a reply to get that far. Every
+alert carries `Details["attribution"]`, set by the engine
+([internal/rules/attribution.go](../internal/rules/attribution.go)):
+
+| alert | attribution | why |
+|---|---|---|
+| signature rule on TCP, flow whose handshake the tracker saw complete | reliable | the source answered the SYN-ACK |
+| signature rule on TCP with `app_proto`, `app_field`, `app_content`, `app_domain`, `app_reason`, `domain_feed`, `ja3_feed` or another per-message option | reliable | the application layer needs a reassembled stream, which needs a handshake; true even for a flow picked up mid-capture |
+| signature rule with `stream_anomaly` | reliable | the stream layer tracks both directions |
+| signature rule on TCP otherwise (a SYN, a flow begun before the capture started, `flags` probes, `ip_feed` on a SYN) | spoofable | nothing proves the source saw a reply |
+| signature rule on UDP, ICMP, other IP, ARP | spoofable | one forged packet is enough |
+| `slowloris` | reliable | connections held open through the stream layer |
+| `beacon` | reliable | repeated answered connections on a timer; periodic forged packets cannot fake it usefully |
+| `arp_spoof` | reliable | keyed on the sender MAC: the MAC is the identity (the incident entity is the MAC, not the claimed IP) |
+| `dns_tunnel`, `dns_nxdomain_burst` over TCP | reliable | the client's own queries over a completed handshake |
+| `dns_tunnel`, `dns_nxdomain_burst` over UDP | spoofable | the client address of a UDP query can be forged |
+| `syn_flood`, `port_scan`, `host_sweep` | spoofable | SYNs of handshakes that never completed |
+| `ping_sweep`, `icmp_flood`, `icmp_tunnel` | spoofable | ICMP |
+| `udp_flood`, `dns_amplification`, `dns_spoof` | spoofable | UDP (reflection works precisely because the source is forged) |
+| `ttl_anomaly`, `frag_attack` | spoofable | per-packet IP header properties |
+| `baseline` | spoofable | rates of packets whatever their origin |
+| incidents | reliable | built only from reliable attackers (below) |
+
+A table test (`TestAttributionClasses`) checks every detector and every
+signature rule kind and category in rules.conf against this table.
+
+**Correlation.** [internal/rules/correlate.go](../internal/rules/correlate.go)
+runs in the pipeline goroutine, inside the engine: every new alert (not
+summaries, not incidents) is added to the bounded history of its source
+(attacker role) and destination (victim role), with its time, sid, stage,
+severity and peer; `detect:incident` rules then look at the histories,
+and `callback` rules also at every new SYN from the handshake tracker.
+Spoofable alerts never name an attacker: a spoofed source Z adds to its
+victim's score, but an incident's attacker needs a reliable alert of its
+own against that victim, so a UDP flood forged from Z cannot frame Z (the
+`spoofed_framing` scenario). A real attacker's SYN scan still counts as
+its recon once it has a reliable alert against the victim. An incident is
+logged when created and updated only when its stage set grows or its
+severity rises, so a long attack gives a handful of records, not one per
+alert. RULES.md has the kinds, windows and score.
+
+The correlator sees what the engine emits, so dedup applies first: a
+second SQL injection within 60 s of the first is a `summary`, not a new
+contribution. That loses nothing a stage set needs (the first alert of
+each sid is always there) and keeps a flood of repeats from filling the
+64-slot histories.
+
 **WSL2 limitations.** The development machine is WSL2, where DNS goes to a
 proxy on `lo` rather than `eth0`, the clock sometimes steps backwards, and
 Hyper-V coalescing produces oversized frames and bad inbound checksums.
@@ -317,7 +402,7 @@ source raises one alert, then settles. ttl_anomaly cannot tell a spoofer
 that guesses the right TTL from the real host.
 
 **Load balancers and anycast over UDP.** Completed TCP connections never
-count as anomalous (ttl_flows remembers them), because a load balancer,
+count as anomalous (tcp_flows remembers them), because a load balancer,
 anycast address or per-flow ECMP path gives each connection its own
 distance. UDP and ICMP have no handshake to prove the source is real, so
 an anycast DNS resolver or CDN answering over UDP from different
@@ -368,6 +453,26 @@ from the reflectors' service ports and are covered by a plain rule on
 `$REFLECTOR_PORTS` (1000013) instead. With `track:by_dst`, a victim that
 also has an unrelated conversation with some of the spoofed addresses
 counts those packets as replies.
+
+**The boiling frog.** Any baseline that adapts can be taught. An attacker
+who raises traffic by a little less than `threshold` deviations per
+interval never produces an anomalous interval, so the baseline follows
+the ramp to any level; the deviation, which grows with each step, makes
+the next step larger still. Freezing on anomalies stops only a jump, and
+`max_step` bounds each update to 20% of the current value (or of the
+floor), which slows a ramp but does not stop one: from 1 to 50 packets/s
+takes about fifteen intervals. A lasting change, legitimate or not, is
+also learned after 60 anomalous intervals in a row, after it alerted. What stops the frog is
+a second, slower reference (last week's baseline) or a fixed ceiling,
+neither of which is implemented; the fixed-threshold detectors (udp_flood,
+syn_flood) are that ceiling for the attacks they cover. Learning also
+trusts its first `learn_intervals`: an attack already running when the
+IDS starts becomes the baseline (`baseline_learning_no_alert`).
+
+**Baseline intervals close on packets.** A baseline interval ends when
+the next packet after it arrives, since the engine clock is packet time.
+A link that goes completely silent never closes an interval, so
+`drop:packets` fires only once traffic, even a trickle, resumes.
 
 ## Testing layers
 

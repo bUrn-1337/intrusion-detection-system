@@ -53,6 +53,7 @@ type EngineStats struct {
 	Packets     uint64 `json:"packets"`
 	Alerts      uint64 `json:"alerts"`
 	Summaries   uint64 `json:"summaries"`
+	Incidents   uint64 `json:"incidents"` // incident and incident_update alerts
 	Suppressed  uint64 `json:"suppressed"`
 	Passed      uint64 `json:"passed"`
 	Whitelisted uint64 `json:"whitelisted"`
@@ -63,6 +64,31 @@ type EngineStats struct {
 	// FragmentsOverLimit counts datagrams with too many fragments to track.
 	FragmentsOverLimit uint64                `json:"fragments_over_limit"`
 	Tables             map[string]TableStats `json:"tables"`
+	Feeds              []FeedStats           `json:"feeds,omitempty"`
+}
+
+// FeedStats describes a loaded threat-intel feed. Ages are in seconds of
+// wall time.
+type FeedStats struct {
+	Name     string  `json:"name"`
+	Type     string  `json:"type"`
+	Path     string  `json:"path"`
+	Entries  int     `json:"entries"`
+	Rejected int     `json:"rejected"`
+	Age      float64 `json:"age_seconds"`
+	MaxAge   float64 `json:"max_age_seconds"` // 0: never stale
+	Stale    bool    `json:"stale"`
+}
+
+// FeedStatsFrom converts the engine's feed list, computing ages at now.
+func FeedStatsFrom(fs []rules.FeedStats, now time.Time) []FeedStats {
+	var out []FeedStats
+	for _, f := range fs {
+		age := max(now.Sub(f.ModTime), 0)
+		out = append(out, FeedStats{Name: f.Name, Type: f.Type, Path: f.Path, Entries: f.Entries, Rejected: f.Rejected,
+			Age: age.Seconds(), MaxAge: f.MaxAge.Seconds(), Stale: f.MaxAge > 0 && age > f.MaxAge})
+	}
+	return out
 }
 
 // StreamStats is stream.Stats with JSON names.
@@ -104,7 +130,7 @@ type TableStats struct {
 // EngineStatsFrom converts the engine's counters for logging.
 func EngineStatsFrom(s rules.EngineStats) EngineStats {
 	out := EngineStats{
-		Packets: s.Packets, Alerts: s.Alerts, Summaries: s.Summaries, Suppressed: s.Suppressed,
+		Packets: s.Packets, Alerts: s.Alerts, Summaries: s.Summaries, Incidents: s.Incidents, Suppressed: s.Suppressed,
 		Passed: s.Passed, Whitelisted: s.Whitelisted, Evictions: s.Evictions, Rules: s.Rules,
 		Reloads: s.Reloads, ReloadFails: s.ReloadFails, FragmentsOverLimit: s.FragmentsOverLimit, Tables: make(map[string]TableStats, len(s.Tables)),
 	}
@@ -126,12 +152,18 @@ type TrafficTotals struct {
 type EventRecord struct {
 	Type  string    `json:"type"` // always TypeEvent; set by the Writer
 	Time  time.Time `json:"time"`
-	Event string    `json:"event"` // EventReload
+	Event string    `json:"event"` // EventReload, EventWarning, ...
 	OK    bool      `json:"ok"`
 	Rules int       `json:"rules"`           // rules active afterwards
 	Path  string    `json:"path,omitempty"`  // the rules file
 	Error string    `json:"error,omitempty"` // every error, one per line
+	// Message is the text of an event other than a reload.
+	Message string `json:"message,omitempty"`
 }
 
-// EventReload is the event of a rules reload.
-const EventReload = "reload"
+// Event names.
+const (
+	EventReload   = "reload"   // a rules reload, OK or not
+	EventWarning  = "warning"  // a problem that did not stop loading: a rejected feed line, a stale feed
+	EventBaseline = "baseline" // a baseline started learning or became active
+)

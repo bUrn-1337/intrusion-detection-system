@@ -283,3 +283,70 @@ func BenchmarkAggregatorPacket(b *testing.B) {
 		a.Packet(ps[i%len(ps)])
 	}
 }
+
+func TestFeedStatsFrom(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	got := FeedStatsFrom([]rules.FeedStats{
+		{Name: "a", Type: "ip", Path: "feeds/a.txt", Entries: 5, Rejected: 1, ModTime: now.Add(-time.Hour), MaxAge: 7 * 24 * time.Hour},
+		{Name: "b", Type: "domain", Entries: 2, ModTime: now.Add(-8 * 24 * time.Hour), MaxAge: 7 * 24 * time.Hour},
+		{Name: "c", Type: "ja3", ModTime: now.Add(-999 * 24 * time.Hour)},
+		{Name: "d", Type: "ip", ModTime: now.Add(time.Hour), MaxAge: time.Minute}, // mtime in the future
+	}, now)
+	want := []FeedStats{
+		{Name: "a", Type: "ip", Path: "feeds/a.txt", Entries: 5, Rejected: 1, Age: 3600, MaxAge: 604800},
+		{Name: "b", Type: "domain", Entries: 2, Age: 8 * 86400, MaxAge: 604800, Stale: true},
+		{Name: "c", Type: "ja3", Age: 999 * 86400},
+		{Name: "d", Type: "ip", MaxAge: 60},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got  %+v\nwant %+v", got, want)
+	}
+}
+
+func TestWarningEventFormat(t *testing.T) {
+	e := &EventRecord{Event: EventWarning, OK: true, Rules: 3, Message: "feed x: f.txt:2: 10.0.0.1 is private\x1b[2J"}
+	if got, want := eventSummary(e), "warning: feed x: f.txt:2: 10.0.0.1 is private?[2J"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestAggregatorIncidents(t *testing.T) {
+	a := NewAggregator(AggregatorConfig{}, t0)
+	inc := func(kind, id, sev, score, chain string, at time.Duration) rules.Alert {
+		return rules.Alert{Time: t0.Add(at), FirstSeen: t0, SID: 1001301, Severity: sev, Kind: kind, SrcIP: "192.0.2.1", Count: 1,
+			Details: map[string]string{"incident_id": id, "kind": "multi_stage", "score": score, "chain": chain, "entity": "e-" + id, "contributing_total": "2"}}
+	}
+	a.Alert(inc(rules.KindIncident, "a", rules.SeverityHigh, "8", "recon -> exploit", 0))
+	a.Alert(inc(rules.KindIncident, "b", rules.SeverityHigh, "9", "recon -> exploit", time.Minute))
+	a.Alert(inc(rules.KindIncidentUpdate, "a", rules.SeverityCritical, "20", "recon -> exploit -> c2", 2*time.Minute))
+	a.Alert(rules.Alert{Time: t0.Add(3 * time.Minute), SrcIP: "192.0.2.1", Kind: rules.KindAlert, Count: 1})
+	a.Tick(t0.Add(time.Second))
+	s := a.Snapshot()
+	if len(s.Incidents) != 2 || s.Incidents[0].ID != "a" || s.Incidents[0].Severity != rules.SeverityCritical || s.Incidents[0].Updates != 1 ||
+		s.Incidents[0].Chain != "recon -> exploit -> c2" || s.Incidents[0].Score != 20 || s.Incidents[1].ID != "b" {
+		t.Fatalf("incidents %+v", s.Incidents)
+	}
+	// Incidents do not count as alerts from their source.
+	if len(s.TopAlerts) != 1 || s.TopAlerts[0].Alerts != 1 || s.Alerts != 4 || !s.AlertClock.Equal(t0.Add(3*time.Minute)) {
+		t.Errorf("top alerts %+v, alerts %d, clock %v", s.TopAlerts, s.Alerts, s.AlertClock)
+	}
+	// Idle for over 24h of alert time: gone.
+	a.Alert(inc(rules.KindIncidentUpdate, "b", rules.SeverityCritical, "30", "recon -> exploit -> c2", 24*time.Hour+3*time.Minute))
+	a.Tick(t0.Add(2 * time.Second))
+	if s := a.Snapshot(); len(s.Incidents) != 1 || s.Incidents[0].ID != "b" {
+		t.Errorf("after expiry %+v", s.Incidents)
+	}
+	// Bounded: the least recently updated go (b, then x0..x9).
+	for i := range MaxIncidents + 10 {
+		a.Alert(inc(rules.KindIncident, fmt.Sprint("x", i), rules.SeverityHigh, "1", "c", 25*time.Hour+time.Duration(i)*time.Second))
+	}
+	a.Tick(t0.Add(3 * time.Second))
+	s = a.Snapshot()
+	ids := make(map[string]bool)
+	for _, in := range s.Incidents {
+		ids[in.ID] = true
+	}
+	if len(s.Incidents) != MaxIncidents || ids["b"] || ids["x9"] || !ids["x10"] || !ids[fmt.Sprint("x", MaxIncidents+9)] {
+		t.Errorf("%d incidents, b %v x9 %v x10 %v", len(s.Incidents), ids["b"], ids["x9"], ids["x10"])
+	}
+}

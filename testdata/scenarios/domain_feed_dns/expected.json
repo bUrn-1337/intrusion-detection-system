@@ -1,0 +1,18 @@
+{
+  "description": "A client resolves www.example.com (not listed) and malware.example.com (listed in feeds/example_domain.txt). The query alerts with field qname; the answer repeats the name but is the same lookup and does not alert again.",
+  "alerts": [
+    {
+      "sid": 1001002,
+      "kind": "alert",
+      "src_ip": "10.0.0.5",
+      "dst_ip": "192.0.2.53",
+      "dst_port": 53,
+      "details": {
+        "domain_feed": "example_domain",
+        "field": "qname",
+        "name": "malware.example.com",
+        "indicator": "malware.example.com"
+      }
+    }
+  ]
+}

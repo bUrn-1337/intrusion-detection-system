@@ -1,4 +1,6 @@
 /bin/
 *.test
 *.out
-CLAUDE.md
+CLAUDE.local.md
+feeds/*.txt
+!feeds/example_*.txt
