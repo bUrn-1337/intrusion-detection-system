@@ -26,6 +26,8 @@ bin/ids query -severity high       # read the alert log
 | [docs/RULES.md](docs/RULES.md) | the rule language, every option with an example |
 | [docs/ADDING_A_DETECTOR.md](docs/ADDING_A_DETECTOR.md) | step-by-step template for a new stateful detector |
 | [docs/SCENARIOS.md](docs/SCENARIOS.md) | end-to-end alert tests and how to add one |
+| [docs/DEMO.md](docs/DEMO.md) | running the IDS live between two machines, and the offline replay |
+| [docs/REPORT-CONTENT.md](docs/REPORT-CONTENT.md) | write-up material: architecture, design deep-dives, results |
 
 ## Pipeline
 
@@ -50,6 +52,182 @@ bin/ids query -severity high       # read the alert log
  Shared type: internal/packet (ParsedPacket) — imported by all, imports nothing internal
  Entry point: cmd/ids
 ```
+
+## Detections
+
+The engine ships **83 detection rules** in `rules.conf`, grouped below. Severity and the matching keyword/option set are in [docs/RULES.md](docs/RULES.md); each has a firing scenario and a benign look-alike under `testdata/scenarios/`.
+
+#### Reconnaissance (11)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1000101 | medium | IP | DNS zone transfer (AXFR) request |
+| 1000224 | medium | TCP | Web scanner User-Agent |
+| 1000401 | medium | IP | Port scan |
+| 1000402 | medium | IP | Host sweep of one port |
+| 1000403 | low | ICMP | Ping sweep |
+| 1000404 | high | TCP | TCP NULL scan packet (no flags) |
+| 1000405 | high | TCP | TCP Xmas scan packet (FIN+PSH+URG) |
+| 1000406 | high | TCP | TCP SYN+FIN packet |
+| 1000407 | low | ICMP | IPv6 Echo Request to multicast |
+| 1000408 | low | ICMP | Traceroute (repeated ICMP Time Exceeded) |
+| 1000409 | low | IP | Low TTL from external source |
+
+#### Denial of service (23)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1000001 | high | TCP | SYN flood against one destination |
+| 1000002 | high | TCP | SYN flood from one source |
+| 1000003 | high | TCP | Land attack (TCP SYN to itself) |
+| 1000004 | medium | IP | IP packet with source equal to destination |
+| 1000005 | high | ICMP | Smurf: Echo Request to Ethernet broadcast |
+| 1000006 | high | ICMP | Smurf: Echo Request to 255.255.255.255 |
+| 1000010 | high | UDP | UDP flood against one destination |
+| 1000011 | high | UDP | UDP flood from one source |
+| 1000012 | high | UDP | UDP flood against one destination (bytes) |
+| 1000013 | high | UDP | UDP reflection/amplification from reflector ports |
+| 1000020 | high | ICMP | ICMP Echo flood against one destination |
+| 1000021 | high | ICMP | ICMP Echo flood from one source |
+| 1000022 | high | ICMP | Unsolicited ICMP Echo Replies (smurf victim) |
+| 1000023 | medium | ICMP | ICMP error flood |
+| 1000030 | high | TCP | Slowloris (slow HTTP headers) from one source |
+| 1000031 | high | TCP | Slowloris (slow HTTP headers) against one server |
+| 1000032 | high | TCP | Slow HTTP POST (R-U-Dead-Yet) |
+| 1000033 | high | TCP | Slow HTTP read (zero window) |
+| 1000106 | high | IP | DNS amplification against one victim |
+| 1000107 | medium | IP | Repeated DNS ANY queries |
+| 1000701 | high | IP | Overlapping IP fragments |
+| 1000703 | high | IP | Oversized IP fragment (ping of death) |
+| 1000704 | medium | IP | IP fragment flood (incomplete datagrams) |
+
+#### Evasion / IDS bypass (3)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1000223 | high | TCP | HTTP URI with overlong UTF-8 encoding |
+| 1000501 | high | TCP | TCP overlapping segment with different data |
+| 1000702 | high | IP | Tiny IP fragment |
+
+#### Spoofing (11)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1000103 | high | IP | DNS responses answering no query |
+| 1000104 | critical | IP | DNS id race (forged answers guessing ids) |
+| 1000105 | high | IP | DNS response for a different question |
+| 1000601 | low | IP | TTL anomaly: likely spoofed source |
+| 1000801 | critical | ARP | ARP spoofing: static binding violated |
+| 1000802 | low | ARP | ARP binding changed MAC |
+| 1000803 | high | ARP | ARP spoofing: binding flip-flopping between MACs |
+| 1000804 | high | ARP | ARP spoofing: unsolicited replies |
+| 1000805 | medium | ARP | ARP spoofing: one MAC claims many addresses |
+| 1000806 | medium | ARP | ARP sender MAC differs from Ethernet source |
+| 1000807 | high | ARP | ARP sender MAC is broadcast, multicast or zero |
+
+#### DNS integrity (1)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1000102 | low | IP | Malformed DNS message |
+
+#### Exfiltration / tunnelling (3)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1000108 | high | IP | DNS tunnel: many random subdomains of one domain |
+| 1000109 | high | IP | DNS tunnel: many TXT/NULL queries to one domain |
+| 1000901 | medium | ICMP | ICMP tunnel (non-standard echo payloads) |
+
+#### Web application (14)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1000202 | medium | TCP | HTTP URI with double percent-encoding |
+| 1000210 | high | TCP | SQL injection: UNION SELECT |
+| 1000211 | high | TCP | SQL injection: quoted OR tautology |
+| 1000212 | high | TCP | SQL injection: time-based delay function |
+| 1000213 | high | TCP | SQL injection: information_schema access |
+| 1000214 | high | TCP | XSS: <script> tag in URI |
+| 1000215 | medium | TCP | XSS: javascript: URL in URI |
+| 1000216 | high | TCP | XSS: event handler in URI |
+| 1000217 | high | TCP | Path traversal in URI |
+| 1000218 | high | TCP | Sensitive system file requested |
+| 1000219 | high | TCP | Command injection in query string |
+| 1000220 | critical | TCP | Log4Shell JNDI lookup in URI |
+| 1000221 | critical | TCP | Log4Shell JNDI lookup in HTTP header |
+| 1000222 | critical | TCP | Shellshock function definition in HTTP header |
+
+#### Credentials (3)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1000201 | medium | TCP | HTTP Basic auth over cleartext |
+| 1000301 | medium | TCP | FTP password sent in cleartext |
+| 1000302 | high | TCP | FTP brute force (repeated 530 login failures) |
+
+#### Malware / C2 (2)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1000110 | medium | IP | Burst of NXDOMAIN for random names (DGA) |
+| 1001101 | medium | IP | Periodic connections to one destination (possible C2 beacon) |
+
+#### Threat intelligence (4)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1001001 | high | IP | Traffic with a threat-intel listed address |
+| 1001002 | high | IP | Threat-intel listed domain |
+| 1001003 | critical | TCP | TLS client fingerprint (JA3) of a known malware family |
+| 1001004 | high | TCP | Threat-intel listed TLS client fingerprint (JA3) |
+
+#### Anomaly (3)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1000502 | medium | TCP | HTTP headers over 16 KiB |
+| 1000902 | low | ICMP | Oversized ICMP Echo Request |
+| 1001201 | medium | IP | Traffic far above its learned baseline |
+
+#### Policy (2)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1000111 | low | TCP | DNS over HTTPS to a public resolver |
+| 1000112 | low | TCP | DNS over TLS connection |
+
+#### Correlation (incidents) (3)
+
+| sid | sev | proto | detection |
+|-----|-----|-------|-----------|
+| 1001301 | — | IP | Multi-stage attack |
+| 1001302 | — | IP | Host compromised after an exploit |
+| 1001303 | — | IP | Exploited host connected back to the attacker |
+
+## Demo
+
+Two ways to see it work, both documented in [docs/DEMO.md](docs/DEMO.md):
+
+- **Offline, no network** — `demo/replay.sh` runs every capture in
+  [demo/captures/](demo/captures/) (one per headline detection, plus two
+  correlated-incident kill chains) through the pipeline and prints a PASS/FAIL
+  table. Representative alert-log, dashboard and `ids query` output for a report
+  is in [demo/output/](demo/output/).
+
+  ```
+  demo/replay.sh                  # replay all captures, verify each fires
+  demo/replay.sh --list           # captures and their headline sid
+  demo/replay.sh --dashboard 29   # watch the kill chain in the live TUI
+  ```
+
+- **Live, two machines** — an attacker host drives the lab-gated scripts in
+  [scripts/attacks/](scripts/attacks/) at a victim/sensor host running the IDS.
+  Each script refuses to run without `--i-have-authorization` and a
+  private-range target. See
+  [scripts/attacks/README.md](scripts/attacks/README.md) for the tools and the
+  sid each triggers, and [docs/DEMO.md](docs/DEMO.md) for the VM and
+  physical-switch setups.
 
 ## Building
 
@@ -172,13 +350,20 @@ is skipped; other invalid lines are skipped and counted.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the branch workflow.
 
-## Status
+## Modules and ownership
 
-| # | Module              | Package                 | Status      |
-|---|---------------------|-------------------------|-------------|
-| 1 | Packet capture      | `internal/capture`      | Done        |
-| 2 | Ethernet/IP parsing | `internal/parser/lower` | Done        |
-| 3 | TCP/UDP/ICMP parsing| `internal/parser/upper` | Done        |
-| 4 | HTTP/DNS/FTP parsing| `internal/parser/app`   | Done        |
-| 5 | Rule engine         | `internal/rules`        | Done        |
-| 6 | Dashboard + logging | `internal/logging`      | Done        |
+All six modules are complete. The shared `internal/packet` contract is imported
+by every module and imports nothing internal; `cmd/ids` wires the pipeline.
+
+| # | Module              | Package                 | Status | Owner |
+|---|---------------------|-------------------------|--------|-------|
+| 1 | Packet capture      | `internal/capture`      | Done   | _TBD_ |
+| 2 | Ethernet/IP parsing | `internal/parser/lower` | Done   | _TBD_ |
+| 3 | TCP/UDP/ICMP parsing| `internal/parser/upper` | Done   | _TBD_ |
+| 4 | HTTP/DNS/FTP parsing | `internal/parser/app`  | Done   | _TBD_ |
+| 5 | Rule engine + correlation | `internal/rules`, `internal/stream`, `internal/intel` | Done | _TBD_ |
+| 6 | Dashboard + logging | `internal/logging`      | Done   | _TBD_ |
+
+<!-- Owners are placeholders: fill in each module's owner (the team lead has the
+     assignment). Update the same table in docs/REPORT-CONTENT.md to match. -->
+

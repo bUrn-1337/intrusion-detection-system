@@ -430,7 +430,14 @@ func overlongAt(s string, i int) (rune, int) {
 		}
 	case c == 0xF0: // 4 bytes for U+0000-U+FFFF: second byte below 90
 		if cont(1) && s[i+1] < 0x90 && cont(2) && cont(3) {
-			return rune(s[i+1]&0x3F)<<12 | rune(s[i+2]&0x3F)<<6 | rune(s[i+3]&0x3F), 4
+			r := rune(s[i+1]&0x3F)<<12 | rune(s[i+2]&0x3F)<<6 | rune(s[i+3]&0x3F)
+			// Surrogates (U+D800-U+DFFF) are not valid scalar values and
+			// have no shortest UTF-8 form, so leave the bytes untouched
+			// rather than collapse them to U+FFFD.
+			if r >= 0xD800 && r <= 0xDFFF {
+				return 0, 0
+			}
+			return r, 4
 		}
 	}
 	return 0, 0
