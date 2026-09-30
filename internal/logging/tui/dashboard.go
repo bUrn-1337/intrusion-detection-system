@@ -178,6 +178,9 @@ func (d *Dashboard) handleKey(ev *tcell.EventKey) *tcell.EventKey {
 			d.resumed = true
 		}
 		d.update()
+	case 'i', 'I':
+		d.model.ShowIncidents = !d.model.ShowIncidents
+		d.update()
 	case 'r', 'R':
 		if d.src.Reload != nil {
 			d.src.Reload()

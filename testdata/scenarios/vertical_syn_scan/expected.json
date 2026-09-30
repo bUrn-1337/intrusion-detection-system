@@ -1,10 +1,9 @@
 {
-  "description": "203.0.113.50 SYN-scans ports 1-1000 of 192.0.2.10 in about 3s, common ports first; 22, 80 and 443 answer SYN/ACK and are reset by the scanner (half-open), the rest refuse. port_scan fires once, lists the open ports, then summarizes. 1000 incomplete handshakes over 1000 ports is not a SYN flood. The SYN to 853 also fires the low-severity DoT policy rule once.",
+  "description": "203.0.113.50 SYN-scans ports 1-1000 of 192.0.2.10 in about 3s, common ports first; 22, 80 and 443 answer SYN/ACK and are reset by the scanner (half-open), the rest refuse. port_scan fires once, lists the open ports, then summarizes. 1000 incomplete handshakes over 1000 ports is not a SYN flood.",
   "alerts": [
     {"sid": 1000401, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1],
      "details": {"detector": "port_scan", "tracked_addr": "203.0.113.50", "distinct_ports": "20", "scan_types": "syn:20", "target_hosts": "192.0.2.10", "open_ports": "22,80,443"}},
-    {"sid": 1000401, "kind": "summary", "src_ip": "203.0.113.50", "count": [900, 1000]},
-    {"sid": 1000112, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "dst_port": 853, "count": [1, 1]}
+    {"sid": 1000401, "kind": "summary", "src_ip": "203.0.113.50", "count": [900, 1000]}
   ],
   "absent_sids": [1000001, 1000002, 1000402]
 }

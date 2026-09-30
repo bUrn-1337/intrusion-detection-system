@@ -1,0 +1,5 @@
+{
+  "description": "10.0.0.20 sends 1 packet/s for 3 minutes, 50 packets/s for 4 minutes, then 1 packet/s for 9 minutes. The busy stretch falls inside the 10-minute learning period, so it is learned, not alerted. The log records when learning ends and when the baseline becomes active.",
+  "absent_sids": [1001201],
+  "log_must_contain": ["baseline learning until 2026-09-26T12:10:00Z", "baseline active"]
+}

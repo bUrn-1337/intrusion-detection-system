@@ -1,0 +1,27 @@
+{
+  "description": "A listed name covers its subdomains, not look-alikes. DNS for a.b.c2.example.net matches c2.example.net; notc2.example.net and c2.example.net.example.test do not. An HTTP Host of login.phish.example.org:8080 matches phish.example.org (listed as *.phish.example.org) once the port is stripped.",
+  "alerts": [
+    {
+      "sid": 1001002,
+      "kind": "alert",
+      "src_ip": "10.0.0.5",
+      "dst_port": 53,
+      "details": {
+        "field": "qname",
+        "name": "a.b.c2.example.net",
+        "indicator": "c2.example.net"
+      }
+    },
+    {
+      "sid": 1001002,
+      "kind": "alert",
+      "src_ip": "10.0.0.8",
+      "dst_port": 8080,
+      "details": {
+        "field": "host",
+        "name": "login.phish.example.org:8080",
+        "indicator": "phish.example.org"
+      }
+    }
+  ]
+}

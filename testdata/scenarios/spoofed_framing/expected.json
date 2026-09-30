@@ -1,0 +1,35 @@
+{
+  "description": "Spoofed packets from the innocent 10.0.0.66 SYN-scan and UDP-flood 10.0.0.80 (recon, then impact: a multi_stage pattern if spoofable sources counted); 203.0.113.9 sends a real UNION SELECT. No incident: 10.0.0.66 has only spoofable alerts, and 203.0.113.9 has one stage.",
+  "alerts": [
+    {
+      "sid": 1000401,
+      "kind": "alert",
+      "src_ip": "10.0.0.66",
+      "details": {
+        "attribution": "spoofable"
+      }
+    },
+    {
+      "sid": 1000010,
+      "kind": "alert",
+      "src_ip": "10.0.0.66",
+      "details": {
+        "attribution": "spoofable"
+      }
+    },
+    {
+      "sid": 1000210,
+      "kind": "alert",
+      "src_ip": "203.0.113.9",
+      "details": {
+        "attribution": "reliable"
+      }
+    }
+  ],
+  "allow_extra": true,
+  "strict_sids": [
+    1001301,
+    1001302,
+    1001303
+  ]
+}

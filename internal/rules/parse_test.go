@@ -269,7 +269,7 @@ func TestParseErrors(t *testing.T) {
 		{"detection_filter count", hdr + `(msg:"m"; sid:1; detection_filter:track by_src, count 0, seconds 1;)`, "count"},
 		{"detection_filter term", hdr + `(msg:"m"; sid:1; detection_filter:track by_src, count 5, secs 1;)`, `unknown term "secs"`},
 		{"detection_filter too big", hdr + `(msg:"m"; sid:1; detection_filter:track by_src, count 100001, seconds 1;)`, "1 to 100000"},
-		{"detect unknown", hdr + `(msg:"m"; sid:1; detect:port_sweep;)`, `detect "port_sweep": want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood, icmp_tunnel, slowloris, dns_spoof, dns_amplification, dns_tunnel or dns_nxdomain_burst`},
+		{"detect unknown", hdr + `(msg:"m"; sid:1; detect:port_sweep;)`, `detect "port_sweep": want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood, icmp_tunnel, slowloris, dns_spoof, dns_amplification, dns_tunnel, dns_nxdomain_burst, beacon, baseline or incident`},
 		{"port_scan missing params", hdr + `(msg:"m"; sid:1; detect:port_scan;)`, "detect:port_scan needs distinct_ports, seconds"},
 		{"port_scan with track", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10; track:by_dst;)`, "option track is not valid with detect:port_scan"},
 		{"port_scan with count", hdr + `(msg:"m"; sid:1; detect:port_scan; distinct_ports:20; seconds:10; count:5;)`, "option count is not valid with detect:port_scan"},
@@ -416,8 +416,12 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rules.conf: %v", err)
 	}
-	if rs.Len() != 74 || len(rs.detectors) != 36 {
+	if rs.Len() != 83 || len(rs.detectors) != 41 || len(rs.incident) != 3 || len(rs.stages.names) != 5 {
 		t.Errorf("rules.conf: %d rules, %d detectors", rs.Len(), len(rs.detectors))
+	}
+	// The example feeds load cleanly.
+	if fs := rs.Feeds(); len(fs) != 3 || fs[0].Entries != 3 || fs[1].Entries != 3 || fs[2].Entries != 2 || len(rs.Warnings()) != 0 {
+		t.Errorf("rules.conf feeds %v, warnings %q", fs, rs.Warnings())
 	}
 	for _, r := range rs.Rules() {
 		if r.Msg == "" || r.Category == "" || r.Severity == "" || r.File != "../../rules.conf" || r.Line == 0 {
@@ -518,8 +522,33 @@ func FuzzLoad(f *testing.F) {
 		`alert tcp any any -> any 443 (msg:"m"; sid:1; app_proto:tls; app_domain:sni,$B;)` + "\n" +
 		`alert tcp any any -> any 443 (msg:"m"; sid:2; app_domain:sni,!$A;)` + "\n" +
 		`alert tcp $A any -> any any (msg:"m"; sid:3; detect:dns_spoof;)`)
+	// Feeds. Texts are parsed as if they were the repo's rules.conf, so
+	// feed paths resolve from the repo root.
+	f.Add("feed ip x feeds/example_ip.txt\nfeed domain d feeds/example_domain.txt max_age:30d\nfeed ja3 j feeds/example_ja3.txt max_age:0\n" +
+		`alert ip any any -> any any (msg:"m"; sid:1; ip_feed:x;)` + "\n" +
+		`alert ip any any -> any any (msg:"m"; sid:2; domain_feed:d,sni;)` + "\n" +
+		`alert tcp any any -> any any (msg:"m"; sid:3; ja3_feed:j,labeled;)`)
+	f.Add("feed ip p testdata/scenarios/feed_private_entry_rejected/feed.txt\n" +
+		`alert ip any any -> any any (msg:"m"; sid:1; ip_feed:p;)`)
+	f.Add("feed ip x missing.txt\nfeed url y feeds/example_ip.txt\nfeed ip x feeds\nfeed ip z feeds/example_ip.txt max_age:-1d\n" +
+		`alert ip any any -> any any (msg:"m"; sid:1; domain_feed:x;)`)
+	f.Add("var ALLOW [connectivitycheck.gstatic.com,msftconnecttest.com]\n" +
+		`alert ip 10.0.0.0/8 any -> any any (msg:"m"; sid:1; detect:beacon; min_events:6; min_interval:10; max_interval:3600; jitter:0.25; min_fraction:0.7; allow:$ALLOW; allow_addrs:[192.0.2.1,198.51.100.0/24]; allow_ports:[123,500:510];)` + "\n" +
+		`alert tcp any any <> any any (msg:"m"; sid:2; detect:beacon; jitter:0.5;)`)
+	f.Add(`alert ip 10.0.0.0/8 any <> any any (msg:"m"; sid:1; detect:baseline; interval:10; learn_intervals:6; threshold:4; sustain:3; max_step:0.2; metrics:packets,bytes,conns,dns,dsts,fanout; drop:packets;)` + "\n" +
+		`alert udp any any -> any any (msg:"m"; sid:2; detect:baseline; metrics:dsts; drop:packets;)` + "\n" +
+		`alert arp any any -> any any (msg:"m"; sid:3; detect:baseline; metrics:bogus,; max_step:0;)`)
+	// Stages and incidents.
+	f.Add("stage recon recon\nstage exploit web,credential\nstage c2 malware,threat-intel\nstage exfil exfiltration\nstage impact dos\n" +
+		`alert tcp any any -> any any (msg:"m"; sid:1; category:web;)` + "\n" +
+		`alert ip any any -> any any (msg:"m"; sid:2; detect:incident; kind:multi_stage; min_stages:3; window:600; first_window:86400; from:exploit;)` + "\n" +
+		`alert ip 10.0.0.0/8 any -> any any (msg:"m"; sid:3; detect:incident; kind:compromised_host; from:exploit; to:c2,exfil;)` + "\n" +
+		`alert ip any any -> any any (msg:"m"; sid:4; detect:incident; kind:callback; window:120;)`)
+	f.Add("stage a recon\nstage a web\nstage b recon,recon\nstage c\nstage d$ x\nstage e nosuchcat\n" +
+		`alert ip any any -> any any (msg:"m"; sid:1; detect:incident; kind:callback; from:a,z; severity:high;)` + "\n" +
+		`alert ip any any <> any any (msg:"m"; sid:2; detect:incident; kind:multi_stage; min_stages:17; window:0;)`)
 	f.Fuzz(func(t *testing.T, text string) {
-		rs, err := Parse(strings.NewReader(text), "fuzz")
+		rs, err := Parse(strings.NewReader(text), "../../rules.conf")
 		if err != nil {
 			if rs != nil {
 				t.Error("RuleSet with error")

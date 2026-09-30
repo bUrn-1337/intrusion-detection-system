@@ -1,0 +1,6 @@
+# Example JA3 feed (feed ja3 NAME PATH): one JA3 MD5 per line, optionally
+# followed by ",label" (a malware family); ja3_feed:NAME,labeled matches
+# only labeled entries. These are the fingerprints of test ClientHellos
+# (pcapgen), not of any real client. Real data: make feeds.
+b54538bcff721c2cd9de6254e79a4406,ExampleBot
+1e7c622032b0cb79401b0f7be3793a1a

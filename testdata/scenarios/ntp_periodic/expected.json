@@ -1,0 +1,5 @@
+{
+  "description": "Look-alike: 10.0.0.10 polls its NTP server (UDP 123) every 64s and resolves time.example.com through its resolver every 60s, 20 times each. Both are perfectly periodic, but port 123 is in the beacon rule's default allow_ports and UDP to port 53 never counts: no alert.",
+  "alerts": [],
+  "absent_sids": [1001101]
+}

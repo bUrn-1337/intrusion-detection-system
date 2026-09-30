@@ -9,12 +9,14 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/bUrn-1337/intrusion-detection-system/internal/intel"
 	"github.com/bUrn-1337/intrusion-detection-system/internal/packet"
 )
 
@@ -96,7 +98,8 @@ func Load(path string) (*RuleSet, error) {
 	return Parse(f, path)
 }
 
-// Parse parses rules from r. name is used as the file name in errors.
+// Parse parses rules from r. name is used as the file name in errors,
+// and relative feed paths are relative to its directory.
 func Parse(r io.Reader, name string) (*RuleSet, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), maxLineLen)
@@ -126,16 +129,20 @@ func Parse(r io.Reader, name string) (*RuleSet, error) {
 	errs = append(errs, verrs...)
 	static, aerrs := parseARPBinds(lines)
 	errs = append(errs, aerrs...)
+	feeds, feedList, warnings, ferrs := parseFeeds(lines, filepath.Dir(name))
+	errs = append(errs, ferrs...)
+	stages, serrs := parseStages(lines)
+	errs = append(errs, serrs...)
 
 	var (
 		rules   []*Rule
 		sidLine = make(map[int]int)
 	)
 	for _, l := range lines {
-		if isVarLine(l.text) || isARPBindLine(l.text) {
+		if isVarLine(l.text) || isARPBindLine(l.text) || isFeedLine(l.text) || isStageLine(l.text) {
 			continue
 		}
-		rule, reasons := parseRule(l.text, vars)
+		rule, reasons := parseRule(l.text, vars, feeds, stages)
 		if rule != nil {
 			if first, dup := sidLine[rule.SID]; dup {
 				reasons = append(reasons, fmt.Sprintf("duplicate sid %d (first defined on line %d)", rule.SID, first))
@@ -151,6 +158,7 @@ func Parse(r io.Reader, name string) (*RuleSet, error) {
 			rules = append(rules, rule)
 		}
 	}
+	errs = append(errs, stages.checkStageCategories(rules)...)
 	if len(errs) > 0 {
 		slices.SortStableFunc(errs, func(a, b lineError) int { return a.line - b.line })
 		le := &LoadError{}
@@ -159,7 +167,122 @@ func Parse(r io.Reader, name string) (*RuleSet, error) {
 		}
 		return nil, le
 	}
-	return newRuleSet(name, rules, static), nil
+	for _, r := range rules {
+		r.stage = stages.stage(r.Category)
+	}
+	rs := newRuleSet(name, rules, static)
+	rs.stages = stages
+	rs.feeds, rs.warnings = feedList, warnings
+	return rs, nil
+}
+
+func isFeedLine(line string) bool {
+	f := strings.Fields(line)
+	return len(f) > 0 && f[0] == "feed"
+}
+
+// maxFeedAge bounds a feed's max_age.
+const maxFeedAge = 3650 * 24 * time.Hour
+
+// parseFeeds reads every "feed TYPE NAME PATH [max_age:DURATION]" line and
+// loads the feed file, relative to dir unless absolute. A feed that
+// cannot be read is an error; rejected entries in it are warnings, and
+// loading goes on with the valid ones.
+func parseFeeds(lines []srcLine, dir string) (map[string]*intel.Feed, []*intel.Feed, []string, []lineError) {
+	var (
+		feeds    map[string]*intel.Feed
+		list     []*intel.Feed
+		first    = make(map[string]int)
+		warnings []string
+		errs     []lineError
+	)
+	for _, l := range lines {
+		if !isFeedLine(l.text) {
+			continue
+		}
+		fail := func(format string, args ...any) {
+			errs = append(errs, lineError{l.n, fmt.Sprintf(format, args...)})
+		}
+		f := strings.Fields(l.text)
+		if len(f) != 4 && len(f) != 5 {
+			fail("feed: want feed TYPE NAME PATH [max_age:DURATION]")
+			continue
+		}
+		typ, ok := intel.ParseType(f[1])
+		if !ok {
+			fail("feed type %q: want ip, domain or ja3", f[1])
+			continue
+		}
+		name := f[2]
+		if !isName(name) {
+			fail("feed name %q: want letters, digits, '_' or '-'", name)
+			continue
+		}
+		if n, dup := first[name]; dup {
+			fail("feed %s defined twice (first defined on line %d)", name, n)
+			continue
+		}
+		first[name] = l.n
+		maxAge := intel.DefaultMaxAge
+		if len(f) == 5 {
+			v, ok := strings.CutPrefix(f[4], "max_age:")
+			d, err := parseAge(v)
+			if !ok || err != nil {
+				fail("feed %s: %q: want max_age:DURATION, e.g. max_age:7d, max_age:12h, or max_age:0 for never stale", name, f[4])
+				continue
+			}
+			maxAge = d
+		}
+		path := f[3]
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(dir, path)
+		}
+		feed, err := intel.Load(name, typ, path)
+		if err != nil {
+			fail("feed %s: %v", name, err)
+			continue
+		}
+		feed.MaxAge = maxAge
+		for _, p := range feed.Problems {
+			warnings = append(warnings, fmt.Sprintf("feed %s: %s", name, p))
+		}
+		if more := feed.Rejected - len(feed.Problems); more > 0 {
+			warnings = append(warnings, fmt.Sprintf("feed %s: %d more rejected lines not listed", name, more))
+		}
+		if feed.Entries == 0 {
+			warnings = append(warnings, fmt.Sprintf("feed %s: %s has no valid entries", name, path))
+		}
+		if feeds == nil {
+			feeds = make(map[string]*intel.Feed)
+		}
+		feeds[name] = feed
+		list = append(list, feed)
+	}
+	return feeds, list, warnings, errs
+}
+
+// parseAge parses a feed max_age: a Go duration (12h, 90m) or a number of
+// days (7d); 0 means never stale.
+func parseAge(s string) (time.Duration, error) {
+	var d time.Duration
+	if n, ok := strings.CutSuffix(s, "d"); ok {
+		days, err := strconv.Atoi(n)
+		if err != nil || days < 0 || days > int(maxFeedAge/(24*time.Hour)) {
+			return 0, errors.New("bad days")
+		}
+		d = time.Duration(days) * 24 * time.Hour
+	} else if s == "0" {
+		return 0, nil
+	} else {
+		var err error
+		if d, err = time.ParseDuration(s); err != nil {
+			return 0, err
+		}
+	}
+	if d < 0 || d > maxFeedAge {
+		return 0, errors.New("out of range")
+	}
+	return d, nil
 }
 
 func isARPBindLine(line string) bool {
@@ -230,7 +353,7 @@ type lineError struct {
 // parseRule parses one non-comment line. It returns every problem found.
 // The rule is nil only when the SID could not be determined, so duplicate
 // SIDs are still detected on lines with other errors.
-func parseRule(line string, vars varTable) (*Rule, []string) {
+func parseRule(line string, vars varTable, feeds map[string]*intel.Feed, stages *stageTable) (*Rule, []string) {
 	var errs []string
 	fail := func(format string, args ...any) { errs = append(errs, fmt.Sprintf(format, args...)) }
 
@@ -322,7 +445,7 @@ func parseRule(line string, vars varTable) (*Rule, []string) {
 	if err != nil {
 		fail("%v", err)
 	}
-	sidSet := parseOptions(r, opts, vars, fail)
+	sidSet := parseOptions(r, opts, vars, feeds, stages, fail)
 
 	if r.Msg == "" && !seenOption(opts, "msg") {
 		fail("missing required option msg")
@@ -433,7 +556,7 @@ func splitOptions(s string) ([]option, error) {
 }
 
 // parseOptions applies opts to r and reports whether sid was set.
-func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...any)) bool {
+func parseOptions(r *Rule, opts []option, vars varTable, feeds map[string]*intel.Feed, stages *stageTable, fail func(string, ...any)) bool {
 	var (
 		sidSet     bool
 		seen       = make(map[string]bool)
@@ -453,6 +576,12 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 		"min_size": true, "arp_op": true, "dsize": true, "metric": true, "max_reply_ratio": true,
 		"stream_anomaly": true, "min_age": true, "min_rate": true, "min_remaining": true,
 		"allow": true, "min_bytes": true, "min_ratio": true, "min_entropy": true, "min_length": true,
+		"ip_feed": true, "domain_feed": true, "ja3_feed": true,
+		"min_events": true, "min_interval": true, "max_interval": true, "jitter": true, "min_fraction": true,
+		"allow_addrs": true, "allow_ports": true,
+		"interval": true, "learn_intervals": true, "threshold": true, "sustain": true, "max_step": true,
+		"metrics": true, "drop": true, "persistence": true, "min_level": true,
+		"min_stages": true, "window": true, "first_window": true, "from": true, "to": true,
 	}
 	var ratio bool
 	for _, o := range opts {
@@ -647,6 +776,49 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 			} else {
 				r.fieldRegex = append(r.fieldRegex, fieldRegex{key: k, re: re})
 			}
+		case "ip_feed", "domain_feed", "ja3_feed":
+			name, arg, hasArg := strings.Cut(v, ",")
+			name, arg = strings.TrimSpace(name), strings.TrimSpace(arg)
+			want := map[string]intel.Type{"ip_feed": intel.IP, "domain_feed": intel.Domain, "ja3_feed": intel.JA3}[o.key]
+			feed, ok := feeds[name]
+			switch {
+			case !ok:
+				fail("%s: no feed named %q (define it with: feed %s %s PATH)", o.key, name, want, name)
+				continue
+			case feed.Type != want:
+				fail("%s: feed %s holds %s entries, not %s", o.key, name, feed.Type, want)
+				continue
+			}
+			switch o.key {
+			case "ip_feed":
+				if hasArg {
+					fail("ip_feed %q: want ip_feed:NAME", v)
+					continue
+				}
+				r.ipFeed = feed
+			case "domain_feed":
+				keys := defaultDomainKeys
+				if hasArg {
+					if !isName(arg) {
+						fail("domain_feed key %q: want letters, digits, '_' or '-'", arg)
+						continue
+					}
+					keys = []string{arg}
+				}
+				r.domainFeed, r.domainKeys = feed, keys
+			case "ja3_feed":
+				switch {
+				case !hasArg:
+				case arg == "labeled":
+					r.ja3Label = ja3Labeled
+				case arg == "unlabeled":
+					r.ja3Label = ja3Unlabeled
+				default:
+					fail("ja3_feed %q: want ja3_feed:NAME, ja3_feed:NAME,labeled or ja3_feed:NAME,unlabeled", v)
+					continue
+				}
+				r.ja3Feed = feed
+			}
 		case "app_reason":
 			switch v {
 			case packet.ReasonMalformed, packet.ReasonSuspicious:
@@ -673,7 +845,7 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 			r.filter = &ws
 		case "detect":
 			if _, ok := detectorOptions[v]; !ok {
-				fail("detect %q: want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood, icmp_tunnel, slowloris, dns_spoof, dns_amplification, dns_tunnel or dns_nxdomain_burst", v)
+				fail("detect %q: want syn_flood, port_scan, host_sweep, ping_sweep, ttl_anomaly, frag_attack, arp_spoof, udp_flood, icmp_flood, icmp_tunnel, slowloris, dns_spoof, dns_amplification, dns_tunnel, dns_nxdomain_burst, beacon, baseline or incident", v)
 				continue
 			}
 			r.Detect = v
@@ -850,6 +1022,177 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 				r.minRate = n
 			} else {
 				r.minRemaining = n
+			}
+		case "min_events":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, beaconRing)
+			if err == nil && n < 3 {
+				err = fmt.Errorf("%d: at least 3 (two intervals)", n)
+			}
+			if err != nil {
+				fail("min_events: %v", err)
+				continue
+			}
+			r.minEvents = n
+		case "persistence":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, 8)
+			if err != nil {
+				fail("persistence: %v", err)
+				continue
+			}
+			r.persistence = n
+		case "min_level":
+			detectOpts = append(detectOpts, o.key)
+			lv, err := parseMinLevels(v)
+			if err != nil {
+				fail("min_level: %v", err)
+				continue
+			}
+			r.minLevel = lv
+		case "min_interval", "max_interval":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, maxSeconds)
+			if err != nil {
+				fail("%s: %v", o.key, err)
+				continue
+			}
+			if o.key == "min_interval" {
+				r.minInterval = time.Duration(n) * time.Second
+			} else {
+				r.maxInterval = time.Duration(n) * time.Second
+			}
+		case "jitter", "min_fraction":
+			detectOpts = append(detectOpts, o.key)
+			f, err := strconv.ParseFloat(v, 64)
+			if o.key == "jitter" {
+				// Below 0.5 the two bands [m(1-j), m(1+j)] and
+				// [2m(1-j), 2m(1+j)] stay apart.
+				if err != nil || !(f > 0 && f < 0.5) {
+					fail("jitter %q: want a number above 0 and below 0.5", v)
+					continue
+				}
+				r.jitter = f
+			} else {
+				if err != nil || !(f > 0 && f <= 1) {
+					fail("min_fraction %q: want a number above 0, at most 1", v)
+					continue
+				}
+				r.minFraction = f
+			}
+		case "allow_addrs":
+			detectOpts = append(detectOpts, o.key)
+			x, err := vars.expand(v, "address", nil)
+			if err == nil {
+				r.allowAddrs, err = parseAddrSpec(x)
+			}
+			if err != nil {
+				fail("allow_addrs: %v", err)
+				continue
+			}
+			r.hasAllowAddrs = true
+		case "allow_ports":
+			detectOpts = append(detectOpts, o.key)
+			x, err := vars.expand(v, "port", nil)
+			if err == nil {
+				r.allowPorts, err = parsePortSpec(x)
+			}
+			if err != nil {
+				fail("allow_ports: %v", err)
+				continue
+			}
+		case "interval":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, 3600)
+			if err != nil {
+				fail("interval: %v", err)
+				continue
+			}
+			r.interval = time.Duration(n) * time.Second
+		case "learn_intervals", "sustain":
+			detectOpts = append(detectOpts, o.key)
+			limit, least := 1000, 2
+			if o.key == "sustain" {
+				limit, least = baselineAdaptAfter, 1
+			}
+			n, err := parsePositive(v, limit)
+			if err == nil && n < least {
+				err = fmt.Errorf("%d: at least %d", n, least)
+			}
+			if err != nil {
+				fail("%s: %v", o.key, err)
+				continue
+			}
+			if o.key == "sustain" {
+				r.sustain = n
+			} else {
+				r.learnIntervals = n
+			}
+		case "threshold":
+			detectOpts = append(detectOpts, o.key)
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil || !(f >= 1 && f <= 100) {
+				fail("threshold %q: want a number of deviations from 1 to 100", v)
+				continue
+			}
+			r.threshold = f
+		case "max_step":
+			detectOpts = append(detectOpts, o.key)
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil || !(f > 0 && f <= 1) {
+				fail("max_step %q: want a number above 0, at most 1", v)
+				continue
+			}
+			r.maxStep = f
+		case "metrics", "drop":
+			detectOpts = append(detectOpts, o.key)
+			s, err := parseMetrics(v)
+			if err == nil && o.key == "drop" && s != 1<<metricPackets {
+				err = fmt.Errorf("only packets can alert on a drop")
+			}
+			if err != nil {
+				fail("%s: %v", o.key, err)
+				continue
+			}
+			if o.key == "metrics" {
+				r.metrics = s
+			} else {
+				r.drop = s
+			}
+		case "min_stages":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, maxStages)
+			if err == nil && n < 2 {
+				err = fmt.Errorf("%d: at least 2", n)
+			}
+			if err != nil {
+				fail("min_stages: %v", err)
+				continue
+			}
+			r.minStages = n
+		case "window", "first_window":
+			detectOpts = append(detectOpts, o.key)
+			n, err := parsePositive(v, maxIncidentWindow)
+			if err != nil {
+				fail("%s: %v", o.key, err)
+				continue
+			}
+			if o.key == "window" {
+				r.incWindow = time.Duration(n) * time.Second
+			} else {
+				r.firstWindow = time.Duration(n) * time.Second
+			}
+		case "from", "to":
+			detectOpts = append(detectOpts, o.key)
+			set, err := stages.parseStageList(v)
+			if err != nil {
+				fail("%s: %v", o.key, err)
+				continue
+			}
+			if o.key == "from" {
+				r.fromStages = set
+			} else {
+				r.toStages = set
 			}
 		case "min_size":
 			detectOpts = append(detectOpts, o.key)
@@ -1048,6 +1391,58 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 		} else if seen["min_entropy"] || seen["min_length"] {
 			fail("min_entropy and min_length are only valid with kind:subdomains")
 		}
+	case DetectBeacon:
+		if !seen["min_events"] {
+			r.minEvents = defaultBeaconMinEvents
+		}
+		if !seen["persistence"] {
+			r.persistence = defaultBeaconPersistence
+		}
+		if !seen["min_interval"] {
+			r.minInterval = defaultBeaconMinInterval
+		}
+		if !seen["max_interval"] {
+			r.maxInterval = defaultBeaconMaxInterval
+		}
+		if !seen["jitter"] {
+			r.jitter = defaultBeaconJitter
+		}
+		if !seen["min_fraction"] {
+			r.minFraction = defaultBeaconMinFraction
+		}
+		if !seen["allow_ports"] {
+			r.allowPorts, _ = parsePortSpec(defaultBeaconAllowPorts)
+		}
+		if r.minInterval > r.maxInterval {
+			fail("min_interval %v is above max_interval %v", r.minInterval, r.maxInterval)
+		}
+	case DetectBaseline:
+		if !seen["interval"] {
+			r.interval = defaultBaselineInterval
+		}
+		if !seen["learn_intervals"] {
+			r.learnIntervals = defaultBaselineLearn
+		}
+		if !seen["threshold"] {
+			r.threshold = defaultBaselineThreshold
+		}
+		if !seen["sustain"] {
+			r.sustain = defaultBaselineSustain
+		}
+		if !seen["max_step"] {
+			r.maxStep = defaultBaselineMaxStep
+		}
+		if !seen["metrics"] {
+			r.metrics = allMetrics
+		}
+		if !seen["min_level"] {
+			r.minLevel = baselineMinLevels
+		}
+		if r.drop&^r.metrics != 0 {
+			fail("drop lists a metric that metrics leaves out")
+		}
+	case DetectIncident:
+		parseIncident(r, kind, seen, stages, fail)
 	case DetectNXDomainBurst:
 		if r.detect.count > maxDistinct {
 			fail("count %d: at most %d", r.detect.count, maxDistinct)
@@ -1057,7 +1452,7 @@ func parseOptions(r *Rule, opts []option, vars varTable, fail func(string, ...an
 		}
 	}
 	for _, k := range []string{"flags", "content", "app_proto", "app_field", "app_reason", "app_content", "app_domain", "regex", "detection_filter",
-		"same_ip", "same_port", "eth_dst", "itype", "icode", "ttl", "arp_op", "dsize", "stream_anomaly"} {
+		"ip_feed", "domain_feed", "ja3_feed", "same_ip", "same_port", "eth_dst", "itype", "icode", "ttl", "arp_op", "dsize", "stream_anomaly"} {
 		if seenOption(opts, k) {
 			fail("option %s cannot be combined with detect", k)
 		}
@@ -1083,7 +1478,11 @@ func knownOption(k string) bool {
 		"distinct_ports", "distinct_hosts", "same_ip", "same_port", "eth_dst", "itype",
 		"icode", "ttl", "kind", "scope", "min_samples", "max_hop_diff", "min_size", "arp_op",
 		"dsize", "metric", "max_reply_ratio", "stream_anomaly", "min_age", "min_rate", "min_remaining",
-		"app_domain", "allow", "min_bytes", "min_ratio", "min_entropy", "min_length":
+		"app_domain", "allow", "min_bytes", "min_ratio", "min_entropy", "min_length",
+		"ip_feed", "domain_feed", "ja3_feed", "min_events", "min_interval", "max_interval", "jitter",
+		"min_fraction", "allow_addrs", "allow_ports", "interval", "learn_intervals", "threshold",
+		"sustain", "max_step", "metrics", "drop", "persistence", "min_level",
+		"min_stages", "window", "first_window", "from", "to":
 		return true
 	}
 	return false
@@ -1123,6 +1522,12 @@ var detectorOptions = map[string]struct{ required, optional []string }{
 	// min_entropy and min_length are valid with kind:subdomains only.
 	DetectDNSTunnel:     {required: []string{"kind", "count", "seconds"}, optional: []string{"min_entropy", "min_length", "allow"}},
 	DetectNXDomainBurst: {required: []string{"count", "seconds"}, optional: []string{"min_entropy"}},
+	DetectBeacon: {optional: []string{"min_events", "persistence", "min_interval", "max_interval", "jitter", "min_fraction",
+		"allow", "allow_addrs", "allow_ports"}},
+	DetectBaseline: {optional: []string{"interval", "learn_intervals", "threshold", "sustain", "max_step", "metrics", "drop", "min_level"}},
+	// min_stages and first_window are valid with kind:multi_stage only,
+	// and to with kind:compromised_host only; parseIncident checks that.
+	DetectIncident: {required: []string{"kind"}, optional: []string{"min_stages", "window", "first_window", "from", "to"}},
 }
 
 // slowKinds lists the slowloris kinds.
@@ -1133,7 +1538,7 @@ func detectorsTaking(k string) string {
 	var names []string
 	for _, d := range []string{DetectSYNFlood, DetectPortScan, DetectHostSweep, DetectPingSweep, DetectTTLAnomaly, DetectFragAttack, DetectARPSpoof,
 		DetectUDPFlood, DetectICMPFlood, DetectICMPTunnel, DetectSlowloris, DetectDNSSpoof, DetectDNSAmplification, DetectDNSTunnel,
-		DetectNXDomainBurst} {
+		DetectNXDomainBurst, DetectBeacon, DetectBaseline, DetectIncident} {
 		spec := detectorOptions[d]
 		if slices.Contains(spec.required, k) || slices.Contains(spec.optional, k) {
 			names = append(names, d)
@@ -1188,6 +1593,24 @@ func checkProtoOptions(r *Rule, fail func(string, ...any)) {
 		if r.Proto != ProtoIP && r.Proto != ProtoTCP && r.Proto != ProtoUDP {
 			fail("detect:%s requires protocol ip, tcp or udp", r.Detect)
 		}
+	case DetectBeacon:
+		if r.Proto != ProtoIP && r.Proto != ProtoTCP && r.Proto != ProtoUDP {
+			fail("detect:%s requires protocol ip, tcp or udp", r.Detect)
+		}
+		if r.bidir {
+			fail("detect:%s needs a one-way rule (->): its source is the host that beacons", r.Detect)
+		}
+	case DetectBaseline:
+		if r.Proto == ProtoARP {
+			fail("detect:%s requires protocol ip, tcp, udp or icmp", r.Detect)
+		}
+	case DetectIncident:
+		if r.Proto != ProtoIP {
+			fail("detect:%s requires protocol ip (it correlates alerts of every protocol)", r.Detect)
+		}
+		if r.bidir {
+			fail("detect:%s needs a one-way rule (->): see RULES.md for what source and destination mean per kind", r.Detect)
+		}
 	}
 	if r.hasAnomaly && r.Proto != ProtoTCP && r.Proto != ProtoIP {
 		fail("stream_anomaly requires protocol tcp or ip")
@@ -1211,7 +1634,10 @@ func checkProtoOptions(r *Rule, fail func(string, ...any)) {
 		fail("detection_filter cannot be used with a pass rule")
 	}
 	if (r.appProto != "" || r.perMessage()) && (r.Proto == ProtoICMP || r.Proto == ProtoARP) {
-		fail("app_proto, app_field, app_reason, app_content and regex on a field require protocol ip, tcp or udp")
+		fail("app_proto, app_field, app_reason, app_content, app_domain, domain_feed, ja3_feed and regex on a field require protocol ip, tcp or udp")
+	}
+	if r.ipFeed != nil && r.Proto == ProtoARP {
+		fail("ip_feed requires an IP protocol (ip, tcp, udp or icmp)")
 	}
 	if len(r.dataRegex) > 0 && r.Proto == ProtoARP {
 		fail("regex:data requires an IP protocol (ip, tcp, udp or icmp)")

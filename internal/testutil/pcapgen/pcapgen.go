@@ -517,29 +517,81 @@ func TCPDNS(msg []byte) []byte {
 }
 
 // TLSClientHello builds a minimal TLS 1.2 ClientHello record with an SNI
-// extension.
+// extension and one cipher suite (0xc02f). Its JA3 string is
+// "771,49199,0,,".
 func TLSClientHello(sni string) []byte {
-	name := []byte(sni)
-	sn := binary.BigEndian.AppendUint16(nil, uint16(len(name)+3)) // server_name_list
-	sn = append(sn, 0)                                            // host_name
-	sn = binary.BigEndian.AppendUint16(sn, uint16(len(name)))
-	sn = append(sn, name...)
-	ext := binary.BigEndian.AppendUint16(nil, 0) // server_name
-	ext = binary.BigEndian.AppendUint16(ext, uint16(len(sn)))
-	ext = append(ext, sn...)
+	return ClientHello{SNI: sni, Ciphers: []uint16{0xc02f}}.Record()
+}
 
+// ClientHello describes a TLS ClientHello with legacy_version 0x0303, for
+// JA3 fingerprints.
+type ClientHello struct {
+	SNI     string   // server_name extension, first; none if empty
+	Ciphers []uint16 // cipher suites
+	Exts    []uint16 // types of empty extensions, after server_name
+	Groups  []uint16 // supported_groups (10) extension, if any
+	Points  []byte   // ec_point_formats (11) extension, if any
+	// GREASE, if not zero, is sent the way browsers do: as the first
+	// cipher suite, the first extension (empty) and the first group.
+	GREASE uint16
+}
+
+// Record returns the ClientHello as one TLS handshake record.
+func (c ClientHello) Record() []byte {
+	u16 := binary.BigEndian.AppendUint16
+	extension := func(dst []byte, typ uint16, data []byte) []byte {
+		dst = u16(dst, typ)
+		dst = u16(dst, uint16(len(data)))
+		return append(dst, data...)
+	}
+	var exts []byte
+	if c.GREASE != 0 {
+		exts = extension(exts, c.GREASE, nil)
+	}
+	if c.SNI != "" {
+		name := []byte(c.SNI)
+		sn := u16(nil, uint16(len(name)+3)) // server_name_list
+		sn = append(sn, 0)                  // host_name
+		sn = u16(sn, uint16(len(name)))
+		exts = extension(exts, 0, append(sn, name...))
+	}
+	for _, t := range c.Exts {
+		exts = extension(exts, t, nil)
+	}
+	if c.Groups != nil {
+		groups := c.Groups
+		if c.GREASE != 0 {
+			groups = append([]uint16{c.GREASE}, groups...)
+		}
+		g := u16(nil, uint16(2*len(groups)))
+		for _, v := range groups {
+			g = u16(g, v)
+		}
+		exts = extension(exts, 10, g)
+	}
+	if c.Points != nil {
+		exts = extension(exts, 11, append([]byte{byte(len(c.Points))}, c.Points...))
+	}
+
+	ciphers := c.Ciphers
+	if c.GREASE != 0 {
+		ciphers = append([]uint16{c.GREASE}, ciphers...)
+	}
 	body := []byte{3, 3}
 	body = append(body, make([]byte, 32)...) // random
 	body = append(body, 0)                   // session id
-	body = append(body, 0, 2, 0xc0, 0x2f)    // one cipher suite
-	body = append(body, 1, 0)                // null compression
-	body = binary.BigEndian.AppendUint16(body, uint16(len(ext)))
-	body = append(body, ext...)
+	body = u16(body, uint16(2*len(ciphers)))
+	for _, v := range ciphers {
+		body = u16(body, v)
+	}
+	body = append(body, 1, 0) // null compression
+	body = u16(body, uint16(len(exts)))
+	body = append(body, exts...)
 
 	hs := []byte{1, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
 	hs = append(hs, body...)
 	rec := []byte{22, 3, 1}
-	rec = binary.BigEndian.AppendUint16(rec, uint16(len(hs)))
+	rec = u16(rec, uint16(len(hs)))
 	return append(rec, hs...)
 }
 

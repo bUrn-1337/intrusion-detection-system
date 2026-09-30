@@ -1,5 +1,5 @@
 // Package app implements Module 4: application-layer parsing of DNS, HTTP/1.x,
-// the FTP control channel and the TLS ClientHello server name.
+// the FTP control channel and the TLS ClientHello (server name and JA3).
 //
 // Parse runs after the stream stage (internal/stream) and is stateless: it
 // looks at one packet at a time and keeps no per-connection memory.
@@ -43,6 +43,26 @@
 // short by the end of the segment is not malformed. Reasons and errors never
 // quote packet bytes, so they cannot leak credentials or contain the ";"
 // reason separator.
+//
+// # JA3
+//
+// A complete ClientHello also gets a JA3 fingerprint
+// (github.com/salesforce/ja3): ja3 is the string
+// "TLSVersion,Ciphers,Extensions,EllipticCurves,ECPointFormats" (decimal
+// values, lists joined with '-', empty when absent) and ja3_hash its MD5
+// in lowercase hex. TLSVersion is the ClientHello's legacy_version, and
+// GREASE values (RFC 8701, 0x0a0a to 0xfafa) are left out of every list.
+// A ClientHello that is cut off or has an extension overrunning its block
+// gets no fingerprint, since a partial one would be a different JA3; a
+// ClientHello split across segments is fingerprinted from the reassembled
+// record when the stream stage has it.
+//
+// JA3 is stable for most non-browser clients (curl, OpenSSL, language
+// runtimes, most malware), which is what feed matching relies on. It is
+// not stable for browsers: Chrome randomizes its extension order on every
+// connection since 2023 (Chrome 110), so one browser produces many JA3
+// hashes. JA4, which sorts the lists to avoid this, is
+// out of scope.
 //
 // # Credentials
 //

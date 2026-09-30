@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: build setcap test scenarios fuzz lint run clean
+.PHONY: build setcap test scenarios fuzz lint run clean feeds
 
 build:
 	go build -o $(BIN_DIR)/ids ./cmd/ids
@@ -34,6 +34,11 @@ lint:
 	else \
 		echo "staticcheck not installed; skipping (go install honnef.co/go/tools/cmd/staticcheck@latest)"; \
 	fi
+
+# Downloads the public threat-intel feeds into feeds/ (scripts/feeds.sh
+# lists the sources and their terms). Not part of the tests.
+feeds:
+	./scripts/feeds.sh
 
 # make run ARGS="-i eth0"   (does not rebuild, so capabilities are kept)
 run:

@@ -1,0 +1,9 @@
+{
+  "description": "After 12 minutes at 1 packet/s, an attacker holds 50 packets/s for 20 minutes to drag the baseline up, pauses for 3 minutes, then sends 45 packets/s. The baseline is frozen while traffic is anomalous, so it stays at 1.0; both episodes alert, and the second is still measured against 1.0.",
+  "alerts": [
+    {"sid": 1001201, "kind": "alert", "count": [1, 1],
+     "details": {"detector": "baseline", "metric": "packets", "value": "50.0", "baseline": "1.0"}},
+    {"sid": 1001201, "kind": "alert", "count": [1, 1],
+     "details": {"detector": "baseline", "metric": "packets", "value": "45.0", "baseline": "1.0"}}
+  ]
+}

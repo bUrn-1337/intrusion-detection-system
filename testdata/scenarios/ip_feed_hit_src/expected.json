@@ -1,0 +1,45 @@
+{
+  "description": "198.51.100.243, inside the listed 198.51.100.240/29, probes SSH on two internal hosts: one alert per (indicator, peer), naming the source side. 198.51.100.239, just below the /29, probes the same hosts and is not listed.",
+  "alerts": [
+    {
+      "sid": 1001001,
+      "kind": "alert",
+      "src_ip": "198.51.100.243",
+      "dst_ip": "10.0.0.21",
+      "details": {
+        "side": "src",
+        "indicator": "198.51.100.243"
+      }
+    },
+    {
+      "sid": 1001001,
+      "kind": "alert",
+      "src_ip": "198.51.100.243",
+      "dst_ip": "10.0.0.22",
+      "details": {
+        "side": "src",
+        "indicator": "198.51.100.243"
+      }
+    },
+    {
+      "sid": 1001001,
+      "kind": "summary",
+      "src_ip": "198.51.100.243",
+      "dst_ip": "10.0.0.21",
+      "count": [
+        2,
+        2
+      ]
+    },
+    {
+      "sid": 1001001,
+      "kind": "summary",
+      "src_ip": "198.51.100.243",
+      "dst_ip": "10.0.0.22",
+      "count": [
+        2,
+        2
+      ]
+    }
+  ]
+}

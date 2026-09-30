@@ -1,0 +1,7 @@
+{
+  "description": "After 12 minutes at 1 packet/s (10 learned intervals of 60s), 10.0.0.20 sends 50 packets/s for 4 minutes. The packets rate stays at least 4 deviations above its baseline for 3 intervals in a row, so the baseline rule fires once for the episode.",
+  "alerts": [
+    {"sid": 1001201, "kind": "alert", "count": [1, 1],
+     "details": {"detector": "baseline", "metric": "packets", "direction": "up", "value": "50.0", "baseline": "1.0", "sustained": "3"}}
+  ]
+}

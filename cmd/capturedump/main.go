@@ -397,6 +397,9 @@ func describeApp(p *packet.ParsedPacket) string {
 		default:
 			s = "TLS"
 		}
+		if h := f["ja3_hash"]; h != "" {
+			s += " JA3 " + h
+		}
 	}
 	for _, kind := range []string{packet.ReasonMalformed, packet.ReasonSuspicious} {
 		if r := f[kind+"_reason"]; r != "" {

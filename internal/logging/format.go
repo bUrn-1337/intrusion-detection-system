@@ -68,12 +68,15 @@ func hostPort(ip string, port uint16) string {
 }
 
 func statsSummary(s *StatsRecord) string {
-	return fmt.Sprintf("%s uptime=%.0fs packets=%d bytes=%d captured=%d kernel_dropped=%d queue_dropped=%d alerts=%d summaries=%d log_dropped=%d",
+	return fmt.Sprintf("%s uptime=%.0fs packets=%d bytes=%d captured=%d kernel_dropped=%d queue_dropped=%d alerts=%d summaries=%d incidents=%d log_dropped=%d",
 		s.Reason, s.Uptime, s.Traffic.Packets, s.Traffic.Bytes, s.Capture.Captured, s.Capture.KernelDropped,
-		s.Capture.QueueDropped, s.Engine.Alerts, s.Engine.Summaries, s.Log.Dropped)
+		s.Capture.QueueDropped, s.Engine.Alerts, s.Engine.Summaries, s.Engine.Incidents, s.Log.Dropped)
 }
 
 func eventSummary(e *EventRecord) string {
+	if e.Event != EventReload {
+		return fmt.Sprintf("%s: %s", e.Event, clean(e.Message))
+	}
 	if e.OK {
 		return fmt.Sprintf("%s ok rules=%d", e.Event, e.Rules)
 	}
@@ -101,11 +104,13 @@ func clean(s string) string {
 //
 //	ALERT [high] sid=N "msg" TCP src:port -> dst:port count=1 time=... k=v ...
 //	SUMMARY [high] sid=N "msg" TCP src:port -> dst:port count=N first=... last=... k=v ...
+//	INCIDENT [critical] sid=N "msg" IP attacker -> victim count=1 time=... chain=... k=v ...
+//	INCIDENT_UPDATE [critical] ... (the same, when an incident grows)
 func FormatAlert(a rules.Alert) string {
 	var b strings.Builder
-	kind := "ALERT"
-	if a.Kind == rules.KindSummary {
-		kind = "SUMMARY"
+	kind := strings.ToUpper(a.Kind)
+	if kind == "" {
+		kind = "ALERT"
 	}
 	fmt.Fprintf(&b, "%s [%s] sid=%d %q %s %s -> %s count=%d", kind, a.Severity, a.SID, a.Msg, a.Proto,
 		alertEndpoint(a.SrcIP, a.SrcPort, a.Proto), alertEndpoint(a.DstIP, a.DstPort, a.Proto), a.Count)

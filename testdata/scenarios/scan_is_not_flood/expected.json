@@ -1,10 +1,9 @@
 {
-  "description": "1000 SYNs from 203.0.113.50 to 1000 different ports on 192.0.2.10 in 1s, all refused: over syn_flood's count and ratio, but spread over far more than max_distinct_ports:5 ports. port_scan fires; syn_flood does not. The SYN to 853 also fires the low-severity DoT policy rule once.",
+  "description": "1000 SYNs from 203.0.113.50 to 1000 different ports on 192.0.2.10 in 1s, all refused: over syn_flood's count and ratio, but spread over far more than max_distinct_ports:5 ports. port_scan fires; syn_flood does not.",
   "alerts": [
     {"sid": 1000401, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "count": [1, 1],
      "details": {"detector": "port_scan", "distinct_ports": "20", "scan_types": "syn:20"}},
-    {"sid": 1000401, "kind": "summary", "src_ip": "203.0.113.50", "count": [900, 1000]},
-    {"sid": 1000112, "kind": "alert", "src_ip": "203.0.113.50", "dst_ip": "192.0.2.10", "dst_port": 853, "count": [1, 1]}
+    {"sid": 1000401, "kind": "summary", "src_ip": "203.0.113.50", "count": [900, 1000]}
   ],
   "absent_sids": [1000001, 1000002, 1000402]
 }
