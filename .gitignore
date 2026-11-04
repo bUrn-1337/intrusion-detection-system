@@ -4,3 +4,4 @@
 CLAUDE.local.md
 feeds/*.txt
 !feeds/example_*.txt
+submission/

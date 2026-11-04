@@ -77,6 +77,11 @@ type View struct {
 	Root                                              *tview.Flex
 	header, traffic, health, proto, talkers, alerting *tview.TextView
 	incidents, alerts                                 *tview.TextView
+
+	// Bottom-panel scroll state, so a manual scroll is not undone on
+	// every one-second refresh (see Render).
+	showingIncidents bool // the bottom panel last showed the incident list
+	rendered         bool // Render has run at least once
 }
 
 // IncidentRows is how many incidents the top panel lists.
@@ -128,9 +133,15 @@ func (v *View) Render(m *Model) {
 	v.incidents.SetTitle(fmt.Sprintf(" Incidents (%d active) ", len(m.Snap.Incidents)))
 	v.incidents.SetText(RenderIncidents(m, IncidentRows))
 	if m.ShowIncidents {
-		v.alerts.SetTitle(" All incidents [i: raw alerts] ")
+		v.alerts.SetTitle(" All incidents [i: raw alerts, PgUp/PgDn/wheel scroll] ")
 		v.alerts.SetText(RenderIncidents(m, 0))
-		v.alerts.ScrollToBeginning()
+		// Jump to the top only when switching into this view; after
+		// that leave the offset alone so a manual scroll (keys or
+		// wheel) survives the next refresh's SetText.
+		if !v.showingIncidents {
+			v.alerts.ScrollToBeginning()
+		}
+		v.showingIncidents, v.rendered = true, true
 		return
 	}
 	title := " Recent alerts [i: incidents] "
@@ -139,7 +150,14 @@ func (v *View) Render(m *Model) {
 	}
 	v.alerts.SetTitle(title)
 	v.alerts.SetText(RenderAlerts(m))
-	v.alerts.ScrollToEnd()
+	// Follow the newest alert only on the first render and when
+	// returning from the incident view; otherwise tview's own
+	// end-tracking keeps us pinned to the tail until the user scrolls
+	// up, which then sticks.
+	if v.showingIncidents || !v.rendered {
+		v.alerts.ScrollToEnd()
+	}
+	v.showingIncidents, v.rendered = false, true
 }
 
 // incidentClock is the time incidents age by: the wall clock live, the
@@ -213,7 +231,7 @@ func RenderHeader(m *Model) string {
 		}
 		reload = fmt.Sprintf("[%s]%s[-] at %s", color, tview.Escape(h.Reload), h.ReloadAt.Format("15:04:05"))
 	}
-	return fmt.Sprintf(" Source: [::b]%s[::-]   Uptime: %s   Rules loaded: %d   Last reload: %s\n Feeds: %s\n Baseline: %s   [gray]keys: q quit   p pause alerts   i incidents/alerts   r reload rules[-]",
+	return fmt.Sprintf(" Source: [::b]%s[::-]   Uptime: %s   Rules loaded: %d   Last reload: %s\n Feeds: %s\n Baseline: %s   [gray]keys: q quit   p pause alerts   i incidents/alerts   r reload rules   PgUp/PgDn/wheel scroll[-]",
 		src, formatUptime(up), h.Rules, reload, renderFeeds(h.Feeds, m.Now), renderBaseline(h.Baseline))
 }
 
