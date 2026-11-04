@@ -1,6 +1,0 @@
-{
-  "dependencies": {
-    "docx": "^9.15.2",
-    "pptxgenjs": "^4.0.1"
-  }
-}

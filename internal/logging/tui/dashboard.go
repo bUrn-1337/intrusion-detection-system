@@ -61,7 +61,12 @@ func New(src Sources, feedBuffer int) *Dashboard {
 		refresh: time.Second,
 		quit:    make(chan struct{}),
 	}
-	d.app.SetRoot(d.view.Root, true).SetInputCapture(d.handleKey)
+	// Focus the bottom panel so its built-in scrolling (arrows, PgUp/
+	// PgDn, Home/End, g/G) works, and enable the mouse so the wheel
+	// scrolls it too. Panel keys (q/i/p/r) are intercepted in handleKey
+	// before they reach the panel; anything else falls through to scroll.
+	d.app.EnableMouse(true)
+	d.app.SetRoot(d.view.Root, true).SetFocus(d.view.alerts).SetInputCapture(d.handleKey)
 	return d
 }
 

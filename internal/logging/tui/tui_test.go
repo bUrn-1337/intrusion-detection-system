@@ -451,7 +451,7 @@ func TestRenderIncidents(t *testing.T) {
 			t.Errorf("incident %d: id, alerts or updates cut off", i)
 		}
 	}
-	for _, want := range []string{"All incidents [i: raw alerts]", "inc-0000000000000006", "192.0.2.7 -> 198.51.100.10"} {
+	for _, want := range []string{"All incidents [i: raw alerts, PgUp/PgDn/wheel scroll]", "inc-0000000000000006", "192.0.2.7 -> 198.51.100.10"} {
 		if _, _, ok := findIn(lines, want); !ok {
 			t.Errorf("missing %q", want)
 		}
