@@ -1,7 +1,7 @@
 # intrusion-detection-system
 
-A network intrusion detection system (IDS) written in Go. It captures packets
-from a live interface or a `.pcap` file, decodes them layer by layer
+A network intrusion detection system (IDS) written in Go. It captures packets from 
+a live interface or a `.pcap` file, decodes them layer by layer
 (Ethernet/IP, TCP/UDP/ICMP, HTTP/DNS/FTP), evaluates each decoded packet
 against Snort-style rules loaded from `rules.conf`, and reports matches through
 a log writer and dashboard. The system is split into six modules that
